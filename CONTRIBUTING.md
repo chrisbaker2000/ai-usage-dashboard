@@ -42,4 +42,7 @@ Open a pull request against `main` and say why the change is needed. The technic
 code is [CLAUDE.md](CLAUDE.md). Behavior that is deliberate and should stay is in
 [docs/known-limitations.md](docs/known-limitations.md).
 
-The same checks run on a macOS runner for each pull request.
+The same checks run on a macOS runner for each pull request. Sign-in tests resolve `claude`,
+`codex`, and `grok` on `PATH` before they mock the process. A machine that has those commands
+installed already satisfies that. The runner has none, so the workflow puts an inert stand-in for
+each name on `PATH`. The stand-in is not used as a real CLI.

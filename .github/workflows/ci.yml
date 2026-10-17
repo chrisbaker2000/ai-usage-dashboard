@@ -11,18 +11,35 @@ permissions:
 jobs:
   test:
     runs-on: macos-latest
+    env:
+      # The image Python lives under a directory other accounts can write. The
+      # dashboard refuses to run that interpreter. Use one uv installed itself.
+      UV_PYTHON_PREFERENCE: only-managed
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
-          python-version: "3.13"
           enable-cache: true
+      - name: Install Python
+        run: uv python install 3.13
       - name: Install dependencies
         run: uv sync --frozen
       - name: Lint
         run: uv run ruff check src tests && uv run ruff format --check src tests
       - name: Typecheck
         run: uv run mypy
+      # Sign-in tests resolve these names before they mock the process.
+      - name: Provide vendor command names
+        run: |
+          bindir="$HOME/usagedash-ci-bin"
+          mkdir -p "$bindir"
+          chmod 755 "$bindir"
+          for name in claude codex grok
+          do
+            printf '%s\n' '#!/bin/sh' 'exit 0' > "$bindir/$name"
+            chmod 755 "$bindir/$name"
+          done
+          echo "$bindir" >> "$GITHUB_PATH"
       - name: Test Python
         run: uv run pytest --cov=usagedash --cov-branch
       - uses: actions/setup-node@v7
