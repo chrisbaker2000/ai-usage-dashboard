@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI usage</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="page-header">
+      <h1>AI usage</h1>
+      <div class="header-status">
+        <span id="updated" class="muted" role="status"></span>
+        <button id="refresh" type="button" class="button">Refresh now</button>
+      </div>
+    </header>
+
+    <main id="main">
+      <p id="load-error" class="banner banner-error" role="alert" hidden></p>
+
+      <section aria-labelledby="quota-heading">
+        <h2 id="quota-heading">Quota</h2>
+        <div id="providers"></div>
+      </section>
+
+      <section aria-labelledby="tokens-heading">
+        <h2 id="tokens-heading">Token usage</h2>
+        <div class="filters">
+          <div class="segmented" role="group" aria-label="Time range">
+            <button type="button" class="segment" data-range="24h" aria-pressed="false">Last 24 hours</button>
+            <button type="button" class="segment" data-range="7d" aria-pressed="true">Last 7 days</button>
+            <button type="button" class="segment" data-range="30d" aria-pressed="false">Last 30 days</button>
+          </div>
+          <label class="select-label">
+            <span>Count</span>
+            <select id="measure">
+              <option value="total">All tokens</option>
+              <option value="no_cache_read">Excluding cache reads</option>
+              <option value="output">Output only</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="token-body">
+          <div id="token-tiles" class="tiles"></div>
+          <figure class="chart-card">
+            <figcaption id="chart-title" class="chart-title"></figcaption>
+            <div id="legend" class="legend"></div>
+            <div id="chart" class="chart"></div>
+          </figure>
+          <div class="table-wrap">
+            <table id="token-table" class="data-table">
+              <caption>
+                Token usage by account for the selected range
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Account</th>
+                  <th scope="col" class="numeric">Input</th>
+                  <th scope="col" class="numeric">Cache read</th>
+                  <th scope="col" class="numeric">Cache write</th>
+                  <th scope="col" class="numeric">Output</th>
+                  <th scope="col" class="numeric">Total</th>
+                  <th scope="col" class="numeric">Requests</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <details class="model-details">
+            <summary>By model</summary>
+            <div class="table-wrap">
+              <table id="model-table" class="data-table">
+                <caption>
+                  Token usage by account and model for the selected range
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Account</th>
+                    <th scope="col">Model</th>
+                    <th scope="col" class="numeric">Input</th>
+                    <th scope="col" class="numeric">Cache read</th>
+                    <th scope="col" class="numeric">Cache write</th>
+                    <th scope="col" class="numeric">Output</th>
+                    <th scope="col" class="numeric">Total</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </details>
+          <section class="cost-section" aria-labelledby="cost-heading">
+            <h3 id="cost-heading">Retail API cost</h3>
+            <p id="cost-note" class="cost-note"></p>
+            <div class="table-wrap">
+              <table id="cost-table" class="data-table">
+                <caption>
+                  Retail API cost by account for the selected range
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Account</th>
+                    <th scope="col" class="numeric">Retail cost</th>
+                    <th scope="col" class="numeric" title="Tokens with no published rate">Unpriced</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <details class="model-details">
+              <summary>Cost by model</summary>
+              <div class="table-wrap">
+                <table id="cost-model-table" class="data-table">
+                  <caption>
+                    Retail API cost by account and model for the selected range
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Account</th>
+                      <th scope="col">Model</th>
+                      <th scope="col" class="numeric">Retail cost</th>
+                      <th scope="col" class="numeric" title="Tokens with no published rate">Unpriced</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </details>
+          </section>
+        </div>
+      </section>
+
+      <section aria-labelledby="sources-heading">
+        <h2 id="sources-heading">Data sources</h2>
+        <ul id="sources" class="sources"></ul>
+      </section>
+    </main>
+
+    <div id="tooltip" class="tooltip" hidden></div>
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,26 @@
+# Collected usage data never belongs in the repo (the live store is in ~/Library/Application Support)
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# Secrets
+.env
+!.env.example
+
+# Python
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# macOS
+.DS_Store
+
+# Local notes. These can name a machine, an account, or a path.
+HANDOFF.md
+.worktrees/

@@ -1,0 +1,27 @@
+name: Bug
+description: Something the dashboard does that it should not
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste tokens, session files, keychain contents, or account email addresses.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw.
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Tool versions
+      description: The output of `claude --version`, `codex --version`, and `grok --version` for the tools you use.
+    validations:
+      required: false

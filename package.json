@@ -1,0 +1,10 @@
+{
+  "name": "ai-usage-dashboard-page",
+  "description": "Test harness for the dashboard's static page scripts. The page itself has no build step and no dependencies.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"tests/js/*.test.js\""
+  }
+}

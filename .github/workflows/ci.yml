@@ -1,0 +1,32 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check src tests && uv run ruff format --check src tests
+      - name: Typecheck
+        run: uv run mypy
+      - name: Test Python
+        run: uv run pytest --cov=usagedash --cov-branch
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Test page scripts
+        run: npm test
