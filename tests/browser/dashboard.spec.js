@@ -1,4 +1,5 @@
-import { mkdir, readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 
 import { expect, test } from '@playwright/test';
 
@@ -17,15 +18,32 @@ test('social preview screenshot fits the shared-link image dimensions', async ({
   expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBe(640);
   const footer = await page.locator('.share-footer').boundingBox();
   expect(footer.y + footer.height).toBeLessThanOrEqual(640);
+  const rendered = await page.screenshot();
+  const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+  const sources = {
+    source_sha256: sha256(await readFile('tests/browser/social-preview.html')),
+    stylesheet_sha256: sha256(await readFile('src/usagedash/static/styles.css')),
+  };
   if (process.env.USAGEDASH_SCREENSHOT === '1') {
     await mkdir('docs/images', { recursive: true });
-    await page.screenshot({ path: 'docs/images/social-preview.png' });
+    await writeFile('docs/images/social-preview.png', rendered);
+    await writeFile(
+      'docs/images/social-preview.json',
+      JSON.stringify({ ...sources, image_sha256: sha256(rendered) }, null, 2) + '\n',
+    );
   }
   const image = await readFile('docs/images/social-preview.png');
-  expect(image.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
-  expect(image.readUInt32BE(16)).toBe(1280);
-  expect(image.readUInt32BE(20)).toBe(640);
-  expect(image.length).toBeLessThan(1_000_000);
+  const manifest = JSON.parse(await readFile('docs/images/social-preview.json', 'utf8'));
+  expect(manifest, 'Run npm run screenshot after changing the card or stylesheet').toEqual({
+    ...sources,
+    image_sha256: sha256(image),
+  });
+  for (const png of [rendered, image]) {
+    expect(png.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+    expect(png.readUInt32BE(16)).toBe(1280);
+    expect(png.readUInt32BE(20)).toBe(640);
+    expect(png.length).toBeLessThan(1_000_000);
+  }
 });
 
 function contrastRatio(foreground, background) {

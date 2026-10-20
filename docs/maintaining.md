@@ -38,6 +38,9 @@ The repository is the installation source. No package registry publishing or hos
 The README screenshots and GitHub's social preview are separate. `npm run screenshot` also builds
 `docs/images/social-preview.png` from the code-native card in `tests/browser/social-preview.html`.
 The card is 1280×640, below 1 MB, and uses synthetic readings with the dashboard's own stylesheet.
+Browser tests render the card on every run. A generated `social-preview.json` binds the committed
+image to the card source and stylesheet hashes, so changes to either require `npm run screenshot`
+before CI passes. Commit the PNG and manifest together; rendering may differ slightly by OS fonts.
 
 Upload that image in repository **Settings → General → Social preview → Edit**. Committing the file
 does not update this setting. Verify that the public repository page's `og:image` and `twitter:image`
