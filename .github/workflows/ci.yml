@@ -8,16 +8,23 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: macos-latest
+    timeout-minutes: 15
     env:
       # The image Python lives under a directory other accounts can write. The
       # dashboard refuses to run that interpreter. Use one uv installed itself.
       UV_PYTHON_PREFERENCE: only-managed
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
       - name: Install Python
@@ -42,8 +49,28 @@ jobs:
           echo "$bindir" >> "$GITHUB_PATH"
       - name: Test Python
         run: uv run pytest --cov=usagedash --cov-branch
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: "22"
+          node-version: '22'
+          cache: npm
+      - name: Install page development tools
+        run: npm ci --ignore-scripts
       - name: Test page scripts
         run: npm test
+      - name: Check page formatting
+        run: npm run format:check
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser

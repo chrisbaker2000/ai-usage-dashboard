@@ -8,9 +8,11 @@ Issues and pull requests are welcome. The dashboard is a program for one person'
 git clone https://github.com/chrisbaker2000/ai-usage-dashboard.git
 cd ai-usage-dashboard
 uv sync
+npm ci
+npx playwright install chromium
 ```
 
-You need macOS, [uv](https://docs.astral.sh/uv/), and Python 3.13 or newer. Everyday use is in
+You need macOS, [uv](https://docs.astral.sh/uv/), Python 3.13 or newer, and Node.js 22 or newer. Everyday use is in
 [README.md](README.md).
 
 ## Checks
@@ -21,11 +23,18 @@ You need macOS, [uv](https://docs.astral.sh/uv/), and Python 3.13 or newer. Ever
 .venv/bin/ruff format --check src tests
 .venv/bin/mypy
 npm test
-prettier --check src/usagedash/static tests/js package.json
+npm run format:check
+npm run test:browser
 ```
 
 `npm test` runs the page scripts with `node --test`. The page has no build step and no runtime
-dependencies. Formatting for the page and its tests uses Prettier 3 with `.prettierrc.json`.
+dependencies. Formatting for the page and its tests uses the locked Prettier version with `.prettierrc.json`.
+Playwright tests cover desktop and mobile layouts in light and dark mode, keyboard navigation,
+renaming, filtering, and refresh. The browser tests serve static files on a separate loopback port
+and supply synthetic accounts through a signed demo API. They do not start the collector.
+
+Run `npm run screenshot` to regenerate `docs/images/dashboard-dark.png` and
+`docs/images/dashboard-light.png` from that same demo. Never use a live account screenshot in the README.
 
 After a Python change, run `.venv/bin/usagedash agent install` so a loaded agent picks it up. After
 a static-file change, run `.venv/bin/usagedash open` again.
@@ -42,7 +51,11 @@ Open a pull request against `main` and say why the change is needed. The technic
 code is [CLAUDE.md](CLAUDE.md). Behavior that is deliberate and should stay is in
 [docs/known-limitations.md](docs/known-limitations.md).
 
-The same checks run on a macOS runner for each pull request. Sign-in tests resolve `claude`,
+Python and page unit checks run on a macOS runner for each pull request; browser tests run on Linux.
+Sign-in tests resolve `claude`,
 `codex`, and `grok` on `PATH` before they mock the process. A machine that has those commands
 installed already satisfies that. The runner has none, so the workflow puts an inert stand-in for
 each name on `PATH`. The stand-in is not used as a real CLI.
+
+The maintainer reviews external workflow runs before they start. Changes to `main` require a pull
+request and passing `test` and `browser` checks. Dependency updates arrive through Dependabot.

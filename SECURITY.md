@@ -1,5 +1,10 @@
 # Security
 
+## Supported versions
+
+Security fixes target the latest code on `main`. The project is in beta; update to the latest code
+before checking whether an issue is still present. Provider compatibility fixes follow the same policy.
+
 ## Reporting a vulnerability
 
 Open a [private security advisory](https://github.com/chrisbaker2000/ai-usage-dashboard/security/advisories/new)

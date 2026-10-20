@@ -1,10 +1,27 @@
 # AI usage dashboard
 
 [![tests](https://github.com/chrisbaker2000/ai-usage-dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/chrisbaker2000/ai-usage-dashboard/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-82d7b6.svg)](LICENSE)
+![macOS](https://img.shields.io/badge/platform-macOS-8997a7.svg)
+![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-6b9ff5.svg)
 
 A local Mac dashboard for the Claude, Codex, and Grok subscription accounts you sign in on this
 computer. It shows quota windows and reset times, token use from this Mac's session files, and what
 those tokens would have cost at the vendors' published short-prompt API rates.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-dark.png" />
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/dashboard-light.png" />
+  <img src="docs/images/dashboard-dark.png" alt="AI usage dashboard showing six demo accounts across Claude, Codex, and Grok, with quota meters, reset times, and usage sparklines." width="1440" />
+</picture>
+
+_Real dashboard, synthetic demo accounts. Follows your Mac's light or dark appearance._
+
+- **See your headroom.** Quota windows, reset times, and advice on which account to use.
+- **Understand your usage.** Token history by account and model, with comparable retail API cost.
+- **Keep it local.** Your accounts and data stay on your Mac. No API key or frontend build required.
+
+[Install](#install) · [Add an account](#add-an-account) · [Security](SECURITY.md) · [Contribute](CONTRIBUTING.md)
 
 The page is served on this Mac only, at <http://127.0.0.1:8787>, by a launchd agent that keeps
 collecting while you are logged in. It is not a shared or hosted service. Each person runs their own
@@ -282,12 +299,15 @@ The design of the page token, and the rate assumptions behind the retail cost, a
 
 ```bash
 uv sync
+npm ci
 .venv/bin/python -m pytest --cov=usagedash --cov-branch
 .venv/bin/ruff check src tests
 .venv/bin/ruff format --check src tests
 .venv/bin/mypy
 npm test
-prettier --check src/usagedash/static tests/js package.json
+npm run format:check
+npx playwright install chromium
+npm run test:browser
 ```
 
 `npm test` runs the page scripts with `node --test`. The page has no build step and no runtime
@@ -296,6 +316,14 @@ static-file change, run `open` again.
 
 The automated tests do not complete a live vendor sign-in. `usagedash login` is still the way to add
 an account.
+
+Browser tests run the actual page against synthetic accounts and a signed demo API. They never read
+your vendor logins or usage database. To regenerate the light and dark README screenshots, run
+`npm run screenshot`. Node.js 22 or newer is needed only for development; everyday use needs Python.
+
+The provider interfaces are undocumented and can change with a vendor CLI update. This is an
+independent community project. Report compatibility problems using the bug template, with CLI
+versions and no credentials or session files.
 
 ## License
 
