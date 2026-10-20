@@ -33,6 +33,12 @@ for (const width of [320, 390, 768, 1440]) {
       await mountDemo(page);
       await expect(page.locator('.card')).toHaveCount(6);
       await expect(page.locator('#chart svg')).toBeVisible();
+      await expect(page.locator('html')).toHaveCSS('color-scheme', colorScheme);
+      const background = await page.locator('body').evaluate((node) => getComputedStyle(node).backgroundColor);
+      const channels = background.match(/\d+/g).map(Number);
+      const brightness = channels.reduce((sum, channel) => sum + channel, 0) / channels.length;
+      if (colorScheme === 'dark') expect(brightness).toBeLessThan(128);
+      else expect(brightness).toBeGreaterThan(128);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
       for (const card of await page.locator('.card').all()) {
         const bounds = await card.boundingBox();
