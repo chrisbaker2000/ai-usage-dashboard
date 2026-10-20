@@ -3,28 +3,64 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI usage</title>
+    <meta
+      name="description"
+      content="Quota, reset times, and token usage across your Claude, Codex, and Grok accounts. All on your Mac."
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>AI usage dashboard</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
+    <a class="skip-link" href="#main">Skip to dashboard</a>
     <header class="page-header">
-      <h1>AI usage</h1>
-      <div class="header-status">
-        <span id="updated" class="muted" role="status"></span>
-        <button id="refresh" type="button" class="button">Refresh now</button>
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span>usage<span class="brand-suffix">dash</span></span>
       </div>
+      <span class="local-badge"><span class="status-dot" aria-hidden="true"></span>Local on your Mac</span>
     </header>
 
-    <main id="main">
+    <main id="main" tabindex="-1">
+      <div class="page-intro">
+        <div>
+          <p class="eyebrow">A little more headroom</p>
+          <h1>Your AI, at a glance.</h1>
+          <p class="page-description">Quota, resets, and token usage. All your accounts, one quiet place.</p>
+        </div>
+        <div class="header-status">
+          <span id="updated" class="muted" role="status"></span>
+          <button id="refresh" type="button" class="button">Refresh now</button>
+        </div>
+      </div>
+
+      <nav class="section-nav" aria-label="Dashboard sections">
+        <a href="#quota-heading">Quota overview</a>
+        <a href="#tokens-heading">Token usage</a>
+        <a href="#sources-heading">Data sources</a>
+      </nav>
+
       <p id="load-error" class="banner banner-error" role="alert" hidden></p>
 
-      <section aria-labelledby="quota-heading">
-        <h2 id="quota-heading">Quota</h2>
+      <section class="dashboard-section" aria-labelledby="quota-heading">
+        <div class="section-heading">
+          <div>
+            <h2 id="quota-heading">Quota overview</h2>
+            <p>Know when to keep going, switch accounts, or take a break.</p>
+          </div>
+          <span class="section-note">Across all your devices</span>
+        </div>
         <div id="providers"></div>
       </section>
 
-      <section aria-labelledby="tokens-heading">
-        <h2 id="tokens-heading">Token usage</h2>
+      <section class="dashboard-section" aria-labelledby="tokens-heading">
+        <div class="section-heading">
+          <div>
+            <h2 id="tokens-heading">Token usage</h2>
+            <p>A closer look at what you've used, by account and model.</p>
+          </div>
+          <span class="section-note">From this Mac</span>
+        </div>
         <div class="filters">
           <div class="segmented" role="group" aria-label="Time range">
             <button type="button" class="segment" data-range="24h" aria-pressed="false">Last 24 hours</button>
@@ -130,11 +166,20 @@
         </div>
       </section>
 
-      <section aria-labelledby="sources-heading">
-        <h2 id="sources-heading">Data sources</h2>
+      <section class="dashboard-section" aria-labelledby="sources-heading">
+        <div class="section-heading">
+          <div>
+            <h2 id="sources-heading">Data sources</h2>
+            <p>The latest collection status for each connected login.</p>
+          </div>
+        </div>
         <ul id="sources" class="sources"></ul>
       </section>
     </main>
+
+    <footer class="page-footer">
+      <span>Made for your own little corner of AI.</span><span>Your data stays on your Mac.</span>
+    </footer>
 
     <div id="tooltip" class="tooltip" hidden></div>
     <script type="module" src="/static/app.js"></script>

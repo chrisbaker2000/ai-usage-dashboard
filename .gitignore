@@ -6,7 +6,16 @@ data/
 
 # Secrets
 .env
+.env.*
 !.env.example
+!.env.template
+open-dashboard.html
+access-token
+/config.toml
+/homes/
+auth.json
+*.sqlite
+*.sqlite3
 
 # Python
 __pycache__/
@@ -17,6 +26,11 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+dist/
+build/
+node_modules/
+test-results/
+playwright-report/
 
 # macOS
 .DS_Store

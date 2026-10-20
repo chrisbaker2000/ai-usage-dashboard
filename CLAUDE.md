@@ -626,3 +626,9 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
 
 Install and everyday use are in `README.md`. How to propose a change is in `CONTRIBUTING.md`.
 Accepted behavior is in `docs/known-limitations.md`. Changes land through a pull request.
+
+Page development tools are locked in `package-lock.json`. `npm run format:check` checks the page,
+tests, and workflow formatting. `npm run test:browser` runs Playwright on the actual page with the
+signed demo API in `tests/browser/demo.js`, including both appearance modes and narrow screens.
+`npm run screenshot` generates the README images with synthetic accounts; never substitute live
+account data. `AGENTS.md` lists the complete development checks.
