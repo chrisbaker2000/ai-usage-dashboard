@@ -2,7 +2,23 @@ import { mkdir } from 'node:fs/promises';
 
 import { expect, test } from '@playwright/test';
 
-import { mountDemo } from './demo.js';
+import { demoState, mountDemo } from './demo.js';
+
+test('demo forecasts stay before their resets and advice uses every blocking window', () => {
+  for (const provider of demoState().providers) {
+    const active = provider.accounts.find((account) => account.is_active);
+    const used = Math.max(...active.windows.filter((window) => window.blocking).map((window) => window.used_percent));
+    expect(provider.advice.summary).toContain(`${100 - used}% headroom`);
+    for (const account of provider.accounts) {
+      for (const window of account.windows) {
+        if (window.pace_exhausts_at !== null) {
+          expect(Date.parse(window.pace_exhausts_at)).toBeGreaterThan(Date.parse(window.as_of));
+          expect(Date.parse(window.pace_exhausts_at)).toBeLessThan(Date.parse(window.resets_at));
+        }
+      }
+    }
+  }
+});
 
 test('README screenshot renders the real dashboard with demo accounts', async ({ page }) => {
   const errors = [];
@@ -33,6 +49,14 @@ for (const width of [320, 390, 768, 1440]) {
       await mountDemo(page);
       await expect(page.locator('.card')).toHaveCount(6);
       await expect(page.locator('#chart svg')).toBeVisible();
+      await page.getByText('By model', { exact: true }).click();
+      await expect(page.locator('#model-table tbody tr')).toHaveCount(6);
+      await expect(page.locator('#model-table')).toContainText('claude-opus-4-6');
+      await expect(page.locator('#cost-table tbody tr')).toHaveCount(7);
+      await expect(page.locator('#cost-table tbody tr').first()).toContainText('$65');
+      await page.getByText('Cost by model', { exact: true }).click();
+      await expect(page.locator('#cost-model-table tbody tr')).toHaveCount(6);
+      await expect(page.locator('#cost-model-table tbody tr').last()).toContainText('No rate');
       await expect(page.locator('html')).toHaveCSS('color-scheme', colorScheme);
       const background = await page.locator('body').evaluate((node) => getComputedStyle(node).backgroundColor);
       const channels = background.match(/\d+/g).map(Number);

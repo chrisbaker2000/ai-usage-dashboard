@@ -20,7 +20,7 @@ function quota(key, label, percent, resetHours, hours = 168) {
     as_of: iso(),
     freshness: 'live',
     window_seconds: hours * 3600,
-    pace_exhausts_at: percent > 0 && percent < 75 ? iso(32 * HOUR) : null,
+    pace_exhausts_at: percent > 0 && percent < 75 && resetHours > 32 ? iso(32 * HOUR) : null,
   };
 }
 
@@ -83,9 +83,12 @@ export function demoState() {
     },
   ];
   for (const provider of providers) {
+    const active = provider.accounts.find((item) => item.is_active);
+    const headroom =
+      100 - Math.max(...active.windows.filter((window) => window.blocking).map((window) => window.used_percent));
     provider.advice = {
       action: 'stay',
-      summary: `${provider.accounts[0].label} has ${100 - provider.accounts[0].windows[0].used_percent}% headroom.`,
+      summary: `${active.label} has ${headroom}% headroom.`,
       as_of: null,
       next_available_at: null,
     };
@@ -107,13 +110,16 @@ export function demoState() {
         })),
       ),
     ),
-    sources: providers.map((provider) => ({
-      source_id: `${provider.provider}:working login`,
-      kind: 'direct',
-      severity: 'ok',
-      message: 'Connected and collecting',
-      last_success_at: iso(),
-    })),
+    sources: providers.flatMap((provider) =>
+      provider.accounts.map((account) => ({
+        source_id: `${provider.provider}:${account.is_active ? 'working login' : 'standing login'}`,
+        kind: account.is_active ? 'direct' : 'cli',
+        severity: 'ok',
+        message: 'Connected and collecting',
+        last_attempt_at: iso(),
+        last_success_at: iso(),
+      })),
+    ),
   };
 }
 
@@ -138,8 +144,9 @@ function totalCounts(rows) {
 function tokenReport(state, range) {
   const bucketCount = range === '24h' ? 24 : range === '30d' ? 30 : 7;
   const interval = range === '24h' ? HOUR : DAY;
+  const anchor = range === '24h' ? NOW : Date.parse('2026-10-20T04:00:00Z');
   const buckets = Array.from({ length: bucketCount }, (_, index) => {
-    const start = iso((index - bucketCount + 1) * interval);
+    const start = new Date(anchor + (index - bucketCount + 1) * interval).toISOString();
     return { key: range === '24h' ? start : start.slice(0, 10), start };
   });
   const series = state.providers.flatMap((provider) =>
@@ -158,13 +165,49 @@ function tokenReport(state, range) {
       };
     }),
   );
+  const modelNames = { claude: 'claude-opus-4-6', codex: 'gpt-6-sol', grok: 'grok-4.7' };
+  const models = series.map((item) => ({
+    provider: item.provider,
+    account_id: item.account_id,
+    model: item.account_id === '6' ? 'unlisted-demo-model' : modelNames[item.provider],
+    totals: item.totals,
+  }));
+  // Why: demo costs match the short-prompt rates recorded in pricing.py on 2026-10-08.
+  const rates = {
+    claude: [5_000_000n, 500_000n, 25_000_000n],
+    codex: [2_000_000n, 200_000n, 10_000_000n],
+    grok: [2_000_000n, 500_000n, 6_000_000n],
+  };
+  const costs = models.map((row) => {
+    const rate = rates[row.provider];
+    const price =
+      (BigInt(row.totals.input) * rate[0] +
+        BigInt(row.totals.cache_read) * rate[1] +
+        BigInt(row.totals.output) * rate[2]) /
+      1_000_000n;
+    const unpriced = row.model === 'unlisted-demo-model';
+    return {
+      provider: row.provider,
+      account_id: row.account_id,
+      priced_microdollars: unpriced ? '0' : String(price),
+      unpriced_tokens: unpriced ? row.totals.total : '0',
+      models: [
+        {
+          model: row.model,
+          priced: !unpriced,
+          microdollars: unpriced ? null : String(price),
+          unpriced_tokens: unpriced ? row.totals.total : '0',
+        },
+      ],
+    };
+  });
   return {
     range,
     bucket: range === '24h' ? 'hour' : 'day',
     timezone: 'America/New_York',
     buckets,
     series,
-    models: [],
+    models,
     provider_totals: state.providers.map((provider) => ({
       provider: provider.provider,
       display_name: provider.display_name,
@@ -175,7 +218,7 @@ function tokenReport(state, range) {
       currency: 'USD',
       unit: 'microdollar',
       note: 'Estimated at published short-prompt API rates. This is not your subscription charge.',
-      accounts: [],
+      accounts: costs,
     },
   };
 }
