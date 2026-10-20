@@ -4,6 +4,21 @@ import { expect, test } from '@playwright/test';
 
 import { demoState, mountDemo } from './demo.js';
 
+function contrastRatio(foreground, background) {
+  const luminance = (hex) => {
+    const [red, green, blue] = hex
+      .slice(1)
+      .match(/../g)
+      .map((channel) => {
+        const value = Number.parseInt(channel, 16) / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      });
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+  };
+  const values = [luminance(foreground), luminance(background)];
+  return (Math.max(...values) + 0.05) / (Math.min(...values) + 0.05);
+}
+
 test('demo forecasts stay before their resets and advice uses every blocking window', () => {
   for (const provider of demoState().providers) {
     const active = provider.accounts.find((account) => account.is_active);
@@ -58,6 +73,19 @@ for (const width of [320, 390, 768, 1440]) {
       await expect(page.locator('#cost-model-table tbody tr')).toHaveCount(6);
       await expect(page.locator('#cost-model-table tbody tr').last()).toContainText('No rate');
       await expect(page.locator('html')).toHaveCSS('color-scheme', colorScheme);
+      const palette = await page.locator('html').evaluate((node) => {
+        const styles = getComputedStyle(node);
+        const read = (name) => styles.getPropertyValue(name).trim();
+        return {
+          text: ['--text-primary', '--text-secondary', '--text-muted', '--brand'].map(read),
+          surfaces: ['--page', '--surface', '--surface-raised'].map(read),
+        };
+      });
+      for (const text of palette.text) {
+        for (const surface of palette.surfaces) {
+          expect(contrastRatio(text, surface), `${text} on ${surface}`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
       const background = await page.locator('body').evaluate((node) => getComputedStyle(node).backgroundColor);
       const channels = background.match(/\d+/g).map(Number);
       const brightness = channels.reduce((sum, channel) => sum + channel, 0) / channels.length;
