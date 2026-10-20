@@ -7,7 +7,7 @@
   "scripts": {
     "test": "node --test \"tests/js/*.test.js\"",
     "test:browser": "playwright test",
-    "screenshot": "USAGEDASH_SCREENSHOT=1 playwright test --project=chromium --grep 'README screenshot'",
+    "screenshot": "USAGEDASH_SCREENSHOT=1 playwright test --project=chromium --grep screenshot",
     "format:check": "prettier --check src/usagedash/static tests/js tests/browser playwright.config.js package.json .github"
   },
   "devDependencies": {

@@ -34,7 +34,9 @@ renaming, filtering, and refresh. The browser tests serve static files on a sepa
 and supply synthetic accounts through a signed demo API. They do not start the collector.
 
 Run `npm run screenshot` to regenerate `docs/images/dashboard-dark.png` and
-`docs/images/dashboard-light.png` from that same demo. Never use a live account screenshot in the README.
+`docs/images/dashboard-light.png` from that same demo, plus the 1280×640 social-preview card.
+The social image must also be uploaded in GitHub's repository settings; see [Maintaining](docs/maintaining.md).
+Never use a live account screenshot in the README or social preview.
 
 After a Python change, run `.venv/bin/usagedash agent install` so a loaded agent picks it up. After
 a static-file change, run `.venv/bin/usagedash open` again.

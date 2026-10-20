@@ -1,8 +1,32 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 
 import { expect, test } from '@playwright/test';
 
 import { demoState, mountDemo } from './demo.js';
+
+test('social preview screenshot fits the shared-link image dimensions', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 640 });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.route('**/social-preview', (route) =>
+    route.fulfill({ path: 'tests/browser/social-preview.html', contentType: 'text/html' }),
+  );
+  await page.goto('/social-preview');
+  await expect(page.getByRole('heading', { name: 'Your AI, at a glance.' })).toBeVisible();
+  await expect(page.locator('.share-provider')).toHaveCount(3);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1280);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBe(640);
+  const footer = await page.locator('.share-footer').boundingBox();
+  expect(footer.y + footer.height).toBeLessThanOrEqual(640);
+  if (process.env.USAGEDASH_SCREENSHOT === '1') {
+    await mkdir('docs/images', { recursive: true });
+    await page.screenshot({ path: 'docs/images/social-preview.png' });
+  }
+  const image = await readFile('docs/images/social-preview.png');
+  expect(image.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+  expect(image.readUInt32BE(16)).toBe(1280);
+  expect(image.readUInt32BE(20)).toBe(640);
+  expect(image.length).toBeLessThan(1_000_000);
+});
 
 function contrastRatio(foreground, background) {
   const luminance = (hex) => {
