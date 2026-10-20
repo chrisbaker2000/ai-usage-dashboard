@@ -1,8 +1,50 @@
-import { mkdir } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 
 import { expect, test } from '@playwright/test';
 
 import { demoState, mountDemo } from './demo.js';
+
+test('social preview screenshot fits the shared-link image dimensions', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 640 });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.route('**/social-preview', (route) =>
+    route.fulfill({ path: 'tests/browser/social-preview.html', contentType: 'text/html' }),
+  );
+  await page.goto('/social-preview');
+  await expect(page.getByRole('heading', { name: 'Your AI, at a glance.' })).toBeVisible();
+  await expect(page.locator('.share-provider')).toHaveCount(3);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(1280);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBe(640);
+  const footer = await page.locator('.share-footer').boundingBox();
+  expect(footer.y + footer.height).toBeLessThanOrEqual(640);
+  const rendered = await page.screenshot();
+  const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+  const sources = {
+    source_sha256: sha256(await readFile('tests/browser/social-preview.html')),
+    stylesheet_sha256: sha256(await readFile('src/usagedash/static/styles.css')),
+  };
+  if (process.env.USAGEDASH_SCREENSHOT === '1') {
+    await mkdir('docs/images', { recursive: true });
+    await writeFile('docs/images/social-preview.png', rendered);
+    await writeFile(
+      'docs/images/social-preview.json',
+      JSON.stringify({ ...sources, image_sha256: sha256(rendered) }, null, 2) + '\n',
+    );
+  }
+  const image = await readFile('docs/images/social-preview.png');
+  const manifest = JSON.parse(await readFile('docs/images/social-preview.json', 'utf8'));
+  expect(manifest, 'Run npm run screenshot after changing the card or stylesheet').toEqual({
+    ...sources,
+    image_sha256: sha256(image),
+  });
+  for (const png of [rendered, image]) {
+    expect(png.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+    expect(png.readUInt32BE(16)).toBe(1280);
+    expect(png.readUInt32BE(20)).toBe(640);
+    expect(png.length).toBeLessThan(1_000_000);
+  }
+});
 
 function contrastRatio(foreground, background) {
   const luminance = (hex) => {

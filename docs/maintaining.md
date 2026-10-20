@@ -32,3 +32,20 @@ When changing CI job names, update the required status checks in the ruleset at 
 6. Merge through a PR, then create a version tag and GitHub release with changes and compatibility notes.
 
 The repository is the installation source. No package registry publishing or hosted dashboard is configured.
+
+## Shared-link preview
+
+The README screenshots and GitHub's social preview are separate. `npm run screenshot` also builds
+`docs/images/social-preview.png` from the code-native card in `tests/browser/social-preview.html`.
+The card is 1280×640, below 1 MB, and uses synthetic readings with the dashboard's own stylesheet.
+Browser tests render the card on every run. A generated `social-preview.json` binds the committed
+image to the card source and stylesheet hashes, so changes to either require `npm run screenshot`
+before CI passes. Commit the PNG and manifest together; rendering may differ slightly by OS fonts.
+
+Upload that image in repository **Settings → General → Social preview → Edit**. Committing the file
+does not update this setting. Verify that the public repository page's `og:image` and `twitter:image`
+point to the uploaded asset and that it returns an image successfully without authentication.
+
+Reddit and other platforms may cache a failed or older preview. Check a fresh draft after replacing
+the image. Each platform controls whether it displays a link card; a custom image cannot force an
+embed in every app, post type, or community.
