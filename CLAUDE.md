@@ -233,8 +233,14 @@ ValidError` passing it, because a type name cannot be told from a value by its s
   line longer than the window is reported as too long, never shown cut (`doctor.tail_lines`): the cut end
   may have lost the credential name that says its value is one. A nonzero `lsof` exit is no answer
   (`doctor.port_holder`), and `doctor.path_findings` also asks what `agent install` would refuse for the
-  required `security` helper (`agent.helper_problems`, `executables.required_helper_problems`: the same
-  checks as `with_required_helpers`, changing nothing). The whole rendered
+  required `security` helper (`agent.helper_problems` → `executables.required_helper_problems`, which
+  calls `with_required_helpers(..., change_nothing=True)`: the one function install runs, so the two
+  cannot disagree; a first version restated its checks and a review found three cases it missed: an unsafe
+  entry beside the link, a data path holding the PATH separator, and a folder that does not exist yet).
+  `doctor._vendor_finding` likewise runs `execution_environment` (the PATH screen) and then
+  `checked_command`, as `rpc.JsonLineProcess` does, so a PATH directory the collector discards does not
+  supply a CLI in the report either. `test_install_refuses_exactly_what_the_check_reports` runs both modes
+  on each scenario and fails if their messages differ. The whole rendered
   report is screened, not only the log lines it quotes, because it also echoes settings values and paths.
   Every finding field is also made one printable line when the report is formatted (`doctor._single_line`):
   a path or message this package did not write can carry a newline, which would add a line of the report

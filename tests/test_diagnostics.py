@@ -253,9 +253,7 @@ class TestRequiredHelpers:
 
         monkeypatch.setattr(executables, "checked_executable", fail)
 
-        assert self.problems(helper, tmp_path / "data") == [
-            f"cannot use required helper {helper}: {type(error).__name__}"
-        ]
+        assert self.problems(helper, tmp_path / "data") == [f"cannot use a required helper: {type(error).__name__}"]
 
     def test_a_private_folder_already_holding_the_right_link_is_no_problem(self, tmp_path: Path, helper: Path) -> None:
         working = tmp_path / "data"
@@ -313,7 +311,7 @@ class TestRequiredHelpers:
         folder.mkdir(parents=True, mode=0o700)
         (folder / "security").write_text("")
 
-        assert self.problems(helper, working) == [f"cannot examine {folder}: OSError"]
+        assert self.problems(helper, working) == [f"cannot prepare required helpers in {folder}: OSError"]
 
     def test_a_folder_that_cannot_be_looked_at_is_a_problem_named_by_its_type(
         self, tmp_path: Path, helper: Path
@@ -322,8 +320,62 @@ class TestRequiredHelpers:
         blocker.write_text("")
 
         assert self.problems(helper, blocker / "data") == [
-            f"cannot examine {blocker / 'data' / 'agent-bin'}: NotADirectoryError"
+            f"cannot prepare required helpers in {blocker / 'data' / 'agent-bin'}: NotADirectoryError"
         ]
+
+    def test_an_unsafe_entry_beside_the_link_is_a_problem_because_install_checks_every_entry_in_the_folder(
+        self, tmp_path: Path, helper: Path
+    ) -> None:
+        working = tmp_path / "data"
+        folder = working / "agent-bin"
+        folder.mkdir(parents=True, mode=0o700)
+        (folder / "security").symlink_to(helper.resolve())
+        sibling = executable_file(folder / "loose", mode=0o777)
+
+        [problem] = self.problems(helper, working)
+
+        assert "executable entry" in problem
+        assert str(sibling) in problem
+
+    @pytest.mark.parametrize("folder_exists", [False, True])
+    def test_a_data_directory_whose_path_holds_the_path_separator_is_a_problem_before_anything_exists(
+        self, tmp_path: Path, helper: Path, folder_exists: bool
+    ) -> None:
+        working = tmp_path / "a:b" / "data"
+        if folder_exists:
+            (working / "agent-bin").mkdir(parents=True, mode=0o700)
+
+        assert self.problems(helper, working) == ["the required helper directory holds the PATH separator"]
+
+    def test_nothing_is_created_when_asking(self, tmp_path: Path, helper: Path) -> None:
+        working = tmp_path / "data"
+
+        self.problems(helper, working)
+
+        assert not working.exists()
+
+    @pytest.mark.parametrize("scenario", ["clean", "unexpected target", "unsafe sibling", "separator", "no helper"])
+    def test_install_refuses_exactly_what_the_check_reports(self, tmp_path: Path, helper: Path, scenario: str) -> None:
+        working = tmp_path / ("a:b" if scenario == "separator" else "data")
+        working.mkdir()
+        folder = working / "agent-bin"
+        if scenario in ("unexpected target", "unsafe sibling"):
+            folder.mkdir(mode=0o700)
+        if scenario == "unexpected target":
+            (folder / "security").symlink_to(tmp_path / "somewhere-else")
+        if scenario == "unsafe sibling":
+            executable_file(folder / "loose", mode=0o777)
+        if scenario == "no helper":
+            helper.chmod(0o644)
+
+        reported = self.problems(helper, working)
+
+        if reported:
+            with pytest.raises(ConfigError) as refused:
+                executables.with_required_helpers("", working, [helper])
+            assert [str(refused.value)] == reported
+        else:
+            assert executables.with_required_helpers("", working, [helper]).endswith(str(folder.resolve()))
 
     def test_the_agent_asks_with_the_path_install_builds_and_changes_nothing(
         self, tmp_path: Path, helper: Path, monkeypatch: pytest.MonkeyPatch
@@ -1647,6 +1699,42 @@ class TestTheFullDiagnosis:
 
         assert only(findings, "claude: ").title == f"claude: {on_agent_path.resolve()}"
         assert only(findings, "codex: not found").level is Level.INFO
+
+    def test_a_recorded_path_directory_the_collector_would_discard_does_not_supply_a_cli(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        directory = tmp_path / "agent-bin"
+        executable_file(directory / "claude")
+        executable_file(directory / "loose", mode=0o777)
+        machine.environment = {"PATH": str(directory)}
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=settings_for(tmp_path))
+
+        assert only(findings, "claude: not found").level is Level.INFO
+
+    def test_the_same_directory_without_the_unsafe_entry_supplies_the_cli(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        directory = tmp_path / "agent-bin"
+        on_the_path = executable_file(directory / "claude")
+        machine.environment = {"PATH": str(directory)}
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=settings_for(tmp_path))
+
+        assert only(findings, "claude: ").title == f"claude: {on_the_path.resolve()}"
+
+    def test_a_path_with_every_directory_discarded_finds_nothing_and_never_searches_the_current_directory(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        discarded = tmp_path / "discarded"
+        executable_file(discarded / "loose", mode=0o777)
+        executable_file(tmp_path / "claude")
+        monkeypatch.chdir(tmp_path)
+        machine.environment = {"PATH": str(discarded)}
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=settings_for(tmp_path))
+
+        assert only(findings, "claude: not found").level is Level.INFO
 
     def test_without_an_installed_agent_a_bare_name_is_looked_up_on_this_shells_path(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch

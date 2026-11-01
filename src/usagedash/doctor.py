@@ -29,7 +29,7 @@ from usagedash.agent import AgentPaths, AgentStatus, ServiceState
 from usagedash.api import HEALTH_PATH
 from usagedash.config import LOOPBACK_HOST, MAX_PORT, MIN_PORT, PORT_ENV, Settings
 from usagedash.errors import ConfigError, UsageDashError
-from usagedash.executables import checked_command, checked_executable
+from usagedash.executables import checked_command, checked_executable, execution_environment
 from usagedash.private import ensure_no_ancestor_lets_another_account_replace, what_lets_another_account_change
 
 HTTP_OK = 200
@@ -444,17 +444,22 @@ def vendor_findings(settings: Settings, agent_path: str) -> list[Finding]:
 
 
 def _vendor_finding(name: str, executable: str, agent_path: str, working_directory: Path) -> Finding:
-    """Resolve one CLI with ``executables.checked_command``, then require what that check does not.
+    """Resolve one CLI as ``rpc.JsonLineProcess`` does: screen the PATH, then ``executables.checked_command``.
 
-    That is the call the collector makes before it starts a CLI, so a bare name found on the agent's PATH and
-    a pin whose file has been removed (a Homebrew cask upgrade does that) are judged as the agent will judge
-    them, and not as a missing file. The check accepts a missing target and any file mode, so a dangling link
-    or a file without the execute bit would pass it and still fail when the CLI is started.
+    Those are the two calls the collector makes before it starts a CLI. The first drops every PATH directory
+    that holds an entry another account could change, so a directory that has gained such an entry since the
+    agent was installed does not supply the CLI here any more than it does when the collector asks. The second
+    judges a bare name found on that PATH and a pin whose file has been removed (a Homebrew cask upgrade does
+    that) as the agent will judge them, and not as a missing file. The check accepts a missing target and any
+    file mode, so a dangling link or a file without the execute bit would pass it and still fail when the CLI
+    is started. Helpers are not prepared here: that would create a folder, and ``path_findings`` asks whether
+    install could prepare them.
     """
     pinned_file_is_gone = os.sep in executable and not os.path.lexists(executable)
     try:
         with _logging_silenced():
-            command = checked_command([executable], {"PATH": agent_path}, working_directory, fallback_name=name)
+            environment = execution_environment({"PATH": agent_path}, working_directory)
+            command = checked_command([executable], environment, working_directory, fallback_name=name)
     except FileNotFoundError:
         return Finding(
             Level.INFO,
