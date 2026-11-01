@@ -155,6 +155,36 @@ not running at all and something else answers.
   credential: the home folder is shown as `~`, and the README and the bug template tell users to read the
   output before posting it.
 
+## What the README prompts do not defend against (non-goals)
+
+The prompts in the README have a coding agent run `git`, `uv sync`, and `.venv/bin/usagedash` in the user's own
+checkout. That is code this account already owns and already runs. The project's threat model is another
+account on the same Mac, and everything private here is owner-only for that reason; it does not extend to a
+process that can already write to this account's files, because that process already runs code as the user and
+the prompts give it nothing it lacks.
+
+What the install and update prompts do check is what an outside party could change about **which code** is
+used: the checkout's remote is compared silently with the repository's address (never printed, since a remote
+can carry a credential), the tree must be clean, no commit may be on the checkout that is not on the
+repository's `main`, and the only merge is a fast-forward of `origin/main`. Their exact text is locked by
+digest in `tests/test_readme_prompts.py`.
+
+What they do not check, on purpose:
+
+- **Local Git hooks.** `.git/hooks` is not part of the tracked tree, so a clean `git status` says nothing about
+  it, and `git merge` runs a `post-merge` hook as the account. A hook there was put there by something that
+  could already write to `.git`.
+- **The ignored virtual environment.** `.venv` is ignored by Git, `git status` does not list it, and `uv sync`
+  does not reinstall a package that is already installed, so a changed `.venv/bin/usagedash` survives the
+  checks. Changing it takes write access to the checkout.
+- **The repair, account, and removal prompts run the checkout's `usagedash` without the checkout checks.**
+  They act on an install the user already runs: the agent they diagnose, sign in to, or remove is that same
+  code, started by launchd as the account. They never fetch, pull, or sync anything.
+
+If the threat model were widened to a hostile same-account process, it would also have to cover the shell
+profile, `~/.claude`, the keychain, and the launchd property list, which no prompt here can verify. That is a
+different project.
+
 ## The retail API cost uses the short-prompt standard rate
 
 The token section prices each account's tokens at the vendors' published pay-as-you-go rates

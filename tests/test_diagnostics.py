@@ -2016,6 +2016,38 @@ class TestTheFullDiagnosis:
 
         assert only(findings, "codex: not found").level is Level.INFO
 
+    @pytest.mark.parametrize(
+        ("environment", "expected"),
+        [
+            (None, "SHELL-PATH"),
+            ({}, "DEFAULT-PATH"),
+            ({"USAGEDASH_PORT": "9123"}, "DEFAULT-PATH"),
+            ({"PATH": "/recorded/bin"}, "/recorded/bin"),
+            ({"PATH": ""}, ""),
+        ],
+    )
+    def test_the_agents_path_is_its_recorded_one_then_the_default_and_only_when_nothing_is_installed_this_shells(
+        self, monkeypatch: pytest.MonkeyPatch, environment: dict[str, str] | None, expected: str
+    ) -> None:
+        monkeypatch.setenv("PATH", "SHELL-PATH")
+        monkeypatch.setattr(doctor.os, "defpath", "DEFAULT-PATH")
+
+        assert doctor._agent_path(environment) == expected
+
+    def test_a_property_list_that_records_no_path_is_judged_by_the_default_path_not_this_shells(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        on_shell_path = executable_file(tmp_path / "shell-bin" / "codex")
+        on_default_path = executable_file(tmp_path / "default-bin" / "claude")
+        monkeypatch.setenv("PATH", str(on_shell_path.parent))
+        monkeypatch.setattr(doctor.os, "defpath", str(on_default_path.parent))
+        machine.environment = {"USAGEDASH_PORT": str(PORT)}
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=settings_for(tmp_path))
+
+        assert only(findings, "codex: not found").level is Level.INFO
+        assert only(findings, "claude: ").title == f"claude: {on_default_path.resolve()}"
+
     def test_an_os_error_while_resolving_one_cli_is_a_warning_for_that_cli_and_the_others_are_still_checked(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

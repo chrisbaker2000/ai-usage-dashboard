@@ -276,7 +276,10 @@ ValidError` passing it, because a type name cannot be told from a value by its s
   prompt's exact text is also locked by a SHA-256 digest there (`PROMPT_DIGESTS`): a list of forbidden
   commands can never be complete, so editing a prompt, or appending anything to it, fails a test until a
   person has read the new text as the agent will and set the digest on purpose. The failure message prints
-  the new digest.
+  the new digest. What the prompts deliberately do not defend against (a hostile process that can already
+  write to this account's checkout: local Git hooks, the ignored `.venv`) is a recorded non-goal in
+  `docs/known-limitations.md`, not a missing check; do not add hook or `.venv` verification to them
+  without widening the threat model there first.
   An answer that does not come from the agent is a `FAIL` even when it is healthy. The one thing doctor
   ever binds is a loopback port, briefly, to suggest a free one (`doctor.suggest_port`), and only when a
   conflict is found. The remedy says to change `USAGEDASH_PORT` when this shell sets it to a non-empty

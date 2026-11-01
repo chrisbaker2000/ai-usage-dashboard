@@ -1010,9 +1010,15 @@ def diagnose(paths: AgentPaths, *, shell: SettingsOutcome, served: SettingsOutco
 
 
 def _agent_path(environment: dict[str, str] | None) -> str:
-    """The PATH the agent runs with: the one its property list records, or this shell's when none is installed."""
-    recorded = None if environment is None else environment.get("PATH")
-    return recorded if recorded is not None else os.environ.get("PATH", os.defpath)
+    """The PATH the agent runs with: the one its property list records, or this shell's when none is installed.
+
+    A property list that is there and records no PATH is an installed agent, and this shell's PATH is not its:
+    the collector falls back to ``os.defpath`` for a missing PATH (``executables.execution_environment``), so
+    that is what is judged, and a CLI that only this shell's PATH reaches is reported as the agent will find it.
+    """
+    if environment is None:
+        return os.environ.get("PATH", os.defpath)
+    return environment.get("PATH", os.defpath)
 
 
 def has_failure(findings: Sequence[Finding]) -> bool:
