@@ -181,7 +181,12 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   `doctor._guarded` makes that true of every group of checks: one that raises an exception it does not
   handle is a `FAIL` naming only the exception's type (never its message, which can carry what a CLI or a
   file supplied), and every other check still runs. A vendor CLI whose resolution raises `OSError` is a
-  warning for that CLI alone. It runs
+  warning for that CLI alone. The agent snapshot has the same boundary (`doctor._agent_view`) and, when it
+  raises, is `UNKNOWN` and never stopped, so this shell's settings do not stand in for an agent that was
+  not examined; the two settings loaders do too (`cli._settings_outcome` returns a `ConfigError` naming only
+  the type for anything that is not this package's own error). The data directory must also be writable and
+  searchable by this account (`os.access`), because the database's journal lives there: a folder with no
+  other problem and no write bit would otherwise read "safe to use". It runs
   before settings are loaded (like `status` and `agent uninstall`), so invalid settings are a finding
   and the agent checks still run. The port, the data directory, and the vendor CLIs checked are the installed
   agent's (its plist pins the CLIs), not this shell's; only the PATH check asks what an install from this

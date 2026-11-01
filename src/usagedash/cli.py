@@ -563,11 +563,18 @@ def _manage_installed_agent(action: str) -> int:
 
 
 def _settings_outcome(load: Callable[[], Settings | None]) -> doctor.SettingsOutcome:
-    """Run a settings loader and hand back its error instead of raising, so one bad setting stops one check."""
+    """Run a settings loader and hand back its error instead of raising, so one bad setting stops one check.
+
+    An error this package raised is returned as it is. Anything else (an unreadable file, a failed lookup) is
+    returned as a ``ConfigError`` that names only the exception's type: a traceback would end the report, and
+    the message of an error this package did not write can carry what a file or the environment supplied.
+    """
     try:
         return load()
     except UsageDashError as error:
         return error
+    except Exception as error:  # noqa: BLE001 - the boundary of the report, as ``doctor._guarded``
+        return ConfigError(f"the settings could not be read: {type(error).__name__}")
 
 
 def _shell_settings_as_install_sees_them() -> Settings:

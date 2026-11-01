@@ -118,7 +118,9 @@ not running at all and something else answers.
   can change the data directory, and warns when one can only look at it: any group or other permission
   bit, or any access-control entry, including a deny or the owner's own. The files in it are owner-only
   on their own, so what shows is the folder's listing and the sizes and times of what is in it. It does
-  not tighten the folder; `usagedash agent install` does, as every start of the server does.
+  not tighten the folder; `usagedash agent install` does, as every start of the server does. It also fails
+  when this account cannot write to the folder, since the database and its journal live there; a folder
+  this account cannot even open is reported as one that cannot be examined.
 - **The port holder is only what this account can see.** `doctor` asks `lsof`, which lists only this
   account's processes without administrator rights, and counts only a listener that a connection to
   `127.0.0.1` reaches. A holder it names is real; an absent holder is not proof the port is free, and it

@@ -1760,8 +1760,20 @@ class TestTheFullDiagnosis:
         assert failure.fix == "Run `usagedash agent install`, which makes it owner-only again."
         assert "is safe to use" not in " ".join(titles(findings))
 
-    @pytest.mark.parametrize("mode", [0o700, 0o500])
-    def test_an_owner_only_data_directory_is_safe_to_use(self, tmp_path: Path, mode: int) -> None:
+    def test_an_owner_only_data_directory_this_account_can_write_to_is_safe_to_use(self, tmp_path: Path) -> None:
+        settings = settings_for(tmp_path)
+        data = tmp_path / "data"
+        data.mkdir(mode=0o700)
+
+        assert titles(doctor.data_directory_findings(settings), Level.OK) == [
+            f"The data directory {data} is safe to use"
+        ]
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can open a folder with no read bit")
+    @pytest.mark.parametrize("mode", [0o300, 0o100, 0o000])
+    def test_an_owner_only_data_directory_this_account_cannot_open_is_a_failure_that_cannot_be_examined(
+        self, tmp_path: Path, mode: int
+    ) -> None:
         settings = settings_for(tmp_path)
         data = tmp_path / "data"
         data.mkdir()
@@ -1772,7 +1784,51 @@ class TestTheFullDiagnosis:
         finally:
             data.chmod(0o700)
 
-        assert titles(findings, Level.OK) == [f"The data directory {data} is safe to use"]
+        [failure] = findings
+        assert failure.level is Level.FAIL
+        assert failure.title == f"The data directory cannot be examined: cannot examine {data}: PermissionError"
+        assert "is safe to use" not in " ".join(titles(findings))
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can write to a folder with no write bit")
+    @pytest.mark.parametrize("mode", [0o500, 0o400])
+    def test_an_owner_only_data_directory_this_account_cannot_write_to_is_a_failure_not_safe_to_use(
+        self, tmp_path: Path, mode: int
+    ) -> None:
+        settings = settings_for(tmp_path)
+        data = tmp_path / "data"
+        data.mkdir()
+        data.chmod(mode)
+
+        try:
+            findings = doctor.data_directory_findings(settings)
+        finally:
+            data.chmod(0o700)
+
+        [failure] = findings
+        assert failure.level is Level.FAIL
+        assert failure.title == f"This account cannot write to the data directory {data}"
+        assert failure.details == ("The database, its journal, and the access token live there, so collection fails.",)
+        assert failure.fix == "Run `usagedash agent install`, which makes it writable by you alone again."
+        assert "is safe to use" not in " ".join(titles(findings))
+
+    def test_the_data_directory_is_asked_for_write_and_search_access_by_this_account(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = settings_for(tmp_path)
+        data = tmp_path / "data"
+        data.mkdir(mode=0o700)
+        asked: list[tuple[Path, int]] = []
+
+        def cannot_write(path: Path, mode: int) -> bool:
+            asked.append((Path(path), mode))
+            return False
+
+        monkeypatch.setattr(doctor.os, "access", cannot_write)
+
+        [failure] = doctor.data_directory_findings(settings)
+
+        assert failure.level is Level.FAIL
+        assert asked == [(data, os.W_OK | os.X_OK)]
 
     @pytest.mark.parametrize("mode", [0o750, 0o755, 0o705, 0o701, 0o710, 0o740, 0o704, 0o554])
     def test_a_data_directory_others_can_open_is_a_warning_that_is_not_safe_to_use(
@@ -2841,6 +2897,116 @@ class TestReadingALog:
         output = capsys.readouterr().out
         assert "owner@example.com" not in output
         assert "port must be an integer, got '<email>'" in output
+
+
+class TestAnUnexpectedErrorNeverEndsTheReport:
+    @pytest.mark.parametrize("function", ["installed_environment", "service_state"])
+    def test_an_error_asking_about_the_agent_is_a_failure_naming_its_type_and_the_other_checks_still_run(
+        self,
+        tmp_path: Path,
+        paths: agent.AgentPaths,
+        machine: Machine,
+        monkeypatch: pytest.MonkeyPatch,
+        function: str,
+    ) -> None:
+        def explode(_paths: agent.AgentPaths) -> object:
+            raise RuntimeError("password=hunter2")
+
+        machine.running()
+        monkeypatch.setattr(agent, function, explode)
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=settings_for(tmp_path))
+
+        [failure] = [found for found in findings if "The agent check could not finish" in found.title]
+        assert failure.level is Level.FAIL
+        assert failure.title == "The agent check could not finish: RuntimeError"
+        assert failure.details == ("Every other check ran.",)
+        assert "hunter2" not in repr(findings)
+        assert any(title.startswith("Settings load") for title in titles(findings))
+        assert any("data directory" in title for title in titles(findings))
+
+    def test_a_failed_agent_check_is_unknown_and_not_nothing_installed_so_this_shells_settings_do_not_stand_in(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def explode(_paths: agent.AgentPaths) -> object:
+            raise RuntimeError("synthetic")
+
+        monkeypatch.setattr(agent, "service_state", explode)
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
+
+        assert titles(findings, Level.FAIL) == ["The agent check could not finish: RuntimeError"]
+        assert not [title for title in titles(findings) if title.startswith(("claude:", "codex:", "grok:"))]
+        assert not [title for title in titles(findings) if "data directory" in title]
+
+    def test_the_checks_after_an_install_survive_an_error_asking_about_the_agent(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def explode(_paths: agent.AgentPaths) -> object:
+            raise RuntimeError("password=hunter2")
+
+        monkeypatch.setattr(agent, "service_state", explode)
+
+        findings = doctor.diagnose_agent(paths, PORT)
+
+        assert "The agent check could not finish: RuntimeError" in titles(findings, Level.FAIL)
+        assert "hunter2" not in repr(findings)
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            RuntimeError("password=hunter2"),
+            OSError("input/output error"),
+            PermissionError("denied"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad"),
+            ValueError("password=hunter2"),
+        ],
+    )
+    def test_a_settings_loader_that_raises_something_unexpected_is_a_config_error_naming_only_its_type(
+        self, error: Exception
+    ) -> None:
+        def load() -> Settings:
+            raise error
+
+        outcome = cli._settings_outcome(load)
+
+        assert isinstance(outcome, ConfigError)
+        assert str(outcome) == f"the settings could not be read: {type(error).__name__}"
+
+    def test_an_error_this_package_raised_is_returned_as_it_is(self) -> None:
+        raised = ConfigError("port must be an integer, got 'x'")
+
+        def load() -> Settings:
+            raise raised
+
+        assert cli._settings_outcome(load) is raised
+
+    def test_a_loader_that_returns_nothing_is_nothing(self) -> None:
+        assert cli._settings_outcome(lambda: None) is None
+
+    def test_an_interrupt_is_not_swallowed_by_the_settings_boundary(self) -> None:
+        def load() -> Settings:
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            cli._settings_outcome(load)
+
+    def test_the_doctor_command_still_prints_its_report_when_the_settings_cannot_be_read(
+        self, home: Path, machine: Machine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        machine.nothing_installed()
+
+        def unreadable() -> Settings:
+            raise OSError("password=hunter2")
+
+        monkeypatch.setattr(cli, "_shell_settings_as_install_sees_them", unreadable)
+
+        assert cli.main(["doctor"]) == cli.EXIT_FAILURE
+
+        output = capsys.readouterr().out
+        assert "the settings could not be read: OSError" in output
+        assert "hunter2" not in output
+        assert "Result:" in output
 
 
 class TestFindingWhoHoldsAPort:

@@ -404,6 +404,8 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
     that last entry, so "safe to use" is claimed only after ``what_lets_another_account_change`` finds nothing
     and ``what_lets_another_account_look`` finds nothing: the server makes the directory owner-only, with no
     group or other bits and no access-control list, so a folder that others can open is not as it leaves it.
+    This account must also be able to write to it and open it, as the database and its journal need: a folder
+    with only its owner's read bit has nothing wrong by either question and still stops collection.
     """
     data_dir = settings.data_dir
     try:
@@ -463,6 +465,15 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
                     "listing and the sizes and times of what is in it are visible.",
                 ),
                 make_owner_only,
+            )
+        ]
+    if not os.access(data_dir, os.W_OK | os.X_OK):
+        return [
+            Finding(
+                Level.FAIL,
+                f"This account cannot write to the data directory {data_dir}",
+                ("The database, its journal, and the access token live there, so collection fails.",),
+                "Run `usagedash agent install`, which makes it writable by you alone again.",
             )
         ]
     return [Finding(Level.OK, f"The data directory {data_dir} is safe to use")]
@@ -949,19 +960,33 @@ def _guarded(what: str, check: Callable[[], list[Finding]]) -> list[Finding]:
     try:
         return check()
     except Exception as error:  # noqa: BLE001 - the boundary of a report; see the docstring
-        return [
-            Finding(
-                Level.FAIL,
-                f"The {what} check could not finish: {type(error).__name__}",
-                ("Every other check ran.",),
-                "Run `usagedash doctor` again, and if it ends the same way, post this report in an issue.",
-            )
-        ]
+        return [_check_failure(what, error)]
+
+
+def _check_failure(what: str, error: Exception) -> Finding:
+    return Finding(
+        Level.FAIL,
+        f"The {what} check could not finish: {type(error).__name__}",
+        ("Every other check ran.",),
+        "Run `usagedash doctor` again, and if it ends the same way, post this report in an issue.",
+    )
+
+
+def _agent_view(paths: AgentPaths) -> AgentView:
+    """``_agent_findings``, or a view that knows nothing when it raises what no handler there expected.
+
+    The status is unknown, never stopped: a check that could not finish has not shown that nothing is installed,
+    so this shell's settings do not stand in for the agent's and no later check claims what it cannot know.
+    """
+    try:
+        return _agent_findings(paths)
+    except Exception as error:  # noqa: BLE001 - the boundary of a report; see ``_guarded``
+        return AgentView([_check_failure("agent", error)], None, None, AgentStatus.UNKNOWN)
 
 
 def diagnose_agent(paths: AgentPaths, port: int | None) -> list[Finding]:
     """Check the agent, whether it answers, and its logs. Used alone after an install or an open that failed."""
-    view = _agent_findings(paths)
+    view = _agent_view(paths)
     findings = list(view.findings)
     if port is not None:
         findings.extend(_guarded("port", lambda: _answer_findings(port, view)))
@@ -985,7 +1010,7 @@ def diagnose(paths: AgentPaths, *, shell: SettingsOutcome, served: SettingsOutco
         *_guarded("system", system_findings),
         *_guarded("settings", lambda: settings_findings(shell, served)),
     ]
-    view = _agent_findings(paths)
+    view = _agent_view(paths)
     nothing_is_installed = served is None and view.state is None and view.status is AgentStatus.STOPPED
     effective = (
         served
