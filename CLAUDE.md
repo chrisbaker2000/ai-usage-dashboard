@@ -18,6 +18,7 @@ prettier --write src/usagedash/static tests/js package.json
 .venv/bin/usagedash status
 .venv/bin/usagedash serve
 .venv/bin/usagedash open
+.venv/bin/usagedash doctor
 .venv/bin/usagedash login claude --name work
 .venv/bin/usagedash agent install
 .venv/bin/usagedash agent uninstall
@@ -47,6 +48,7 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
 | `private.py`                           | The one definition of owner-only directories and files; everything in the data directory uses it    |
 | `errors.py`                            | Typed errors. Anything a user can cause surfaces as a `UsageDashError`, never a raw exception       |
 | `standing.py`, `agent.py`, `cli.py`    | Standing-login setup, launchd agent, command line                                                   |
+| `doctor.py`                            | `usagedash doctor`: read-only checks that each say what is wrong and the command that fixes it      |
 | `executables.py`                       | Shared no-open executable trust checks and child PATH/cwd resolution                                |
 | `static/`                              | Vanilla JS page, ES modules, no build step; render-only, all decisions are made server-side         |
 | `static/{format,access,latest}.js`     | The page's pure logic (chart measures included), unit tested in `tests/js/`; `app.js` renders       |
@@ -157,6 +159,184 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   Install and uninstall share `agent._stop`, which checks a nonzero `bootout` result immediately: an absent service permits installation
   to continue; a loaded service or failed inspection raises into rollback. Only an accepted stop
   enters the unload polling loop. This avoids repeated 45-second waits after a rejected request.
+- **`agent install` returns only once the dashboard answers, or says why it did not**
+  (`cli._wait_until_answering`). `launchctl bootstrap` returns as soon as launchd has the service, before
+  Python has imported anything, so an install that stopped there reported "Installed" for an agent that
+  crashed on start or lost the port (a friend's install did, with only `open` failing afterwards). The wait
+  polls `/healthz` for `INSTALL_READY_WAIT_SECONDS` and ends at once on a run launchd lists as failed
+  (`agent.ServiceState.last_run_failed`), since launchd would not start it again for
+  `RESTART_THROTTLE_SECONDS`. Not answering exits 1 and prints `doctor.render_agent_failure` to standard
+  error. **It does not roll the agent back**: the new agent stays installed and launchd keeps restarting it,
+  because a slow start can still come up and a rollback would hide the log the user needs. An old process
+  that answers `/healthz` satisfies the wait; `doctor` names a port holder that is not the agent.
+- **`doctor` starts, stops, installs, and creates nothing, and one check never hides another.** The one
+  change it can cause is the one every command that reads settings or the property list causes: those reads
+  go through `private.read_file_only_owner_can_change`, which makes an owner-owned file that others can
+  read owner-only (`tests/test_diagnostics.py` locks it). A separate reader that leaves modes alone was
+  weighed and not built: it threads a flag through `load_settings` and the property list path, and the
+  tightening is hardening, not a symptom a diagnosis should preserve. An untrusted property list is a
+  `FAIL` and launchd is still asked, so a loaded or crashed agent keeps its pid and exit status in the
+  report. Every check returns `Finding`s; an error
+  this package raised becomes a `FAIL` with its message, anything else is reported by type, and
+  `doctor._guarded` makes that true of every group of checks: one that raises an exception it does not
+  handle is a `FAIL` naming only the exception's type (never its message, which can carry what a CLI or a
+  file supplied), and every other check still runs. A vendor CLI whose resolution raises `OSError` is a
+  warning for that CLI alone. The agent snapshot has the same boundary (`doctor._agent_view`) and, when it
+  raises, is `UNKNOWN` and never stopped, so this shell's settings do not stand in for an agent that was
+  not examined; the two settings loaders do too (`cli._settings_outcome` returns a `ConfigError` naming only
+  the type for anything that is not this package's own error). The data directory must also be writable and
+  searchable by this account (`os.access`), because the database's journal lives there: a folder with no
+  other problem and no write bit would otherwise read "safe to use". It runs
+  before settings are loaded (like `status` and `agent uninstall`), so invalid settings are a finding
+  and the agent checks still run. The port, the data directory, and the vendor CLIs checked are the installed
+  agent's (its plist pins the CLIs), not this shell's; only the PATH check asks what an install from this
+  shell would do. The data directory is checked as install requires it, a real folder this account owns, not
+  only by its ancestors: `ensure_no_ancestor_lets_another_account_replace` skips the last entry. A CLI passes
+  only if the collector's own resolution accepts it (`executables.checked_command`, against the PATH the plist
+  records, or this shell's when nothing is installed, with the vendor command as the fallback name) and the
+  result is also an existing, executable file, which that check does not require. Diagnose by calling what
+  the runtime calls, not by restating its rules: a pin whose file a Homebrew cask upgrade removed still works
+  through the fallback, and a rule-by-rule copy called it missing. Resolution's own log record is silenced
+  for the report (`doctor._logging_silenced`). **A `FAIL` must name a next step** (`Finding.__post_init__`
+  refuses one that does not), and a remedy must be one this package's own commands can carry out: an
+  untrusted property list is cleared with `agent uninstall`, because `agent install` reads the same
+  property list through the same trust check and stops at the same error (when the file is unsafe, not
+  merely unreadable). Settings the installed agent recorded that no longer load are corrected and
+  installed again, not uninstalled: the remedy follows the error's type (`AgentError` or `ConfigError`),
+  never its text. When they cannot be read, the port, data directory, and CLIs are not checked at all,
+  because this shell's would describe another installation. Doctor applies the config-directory guard
+  `agent install` applies first (`cli._shell_settings_as_install_sees_them`), so "settings load" is not
+  claimed for a directory install would refuse.
+  **Attribution goes through two types, not ad hoc branches.** What doctor may claim about the agent's
+  process is `agent.AgentStatus`, decided in one place, `ServiceState.status`, which `agent status`, the
+  install wait, and doctor all follow: `RUNNING` needs a pid; `STOPPED` only when launchd stated a state
+  other than running and named no process; launchd unreachable, a listing that does not say, or a state of
+  "running" with no readable pid is `UNKNOWN`, and no message may say "not running" for it. How the process
+  seen holding the port relates to it is `doctor.Relation`; nobody seen is `UNKNOWN`, never "another
+  program", because `lsof` shows only this account's processes and can fail. An unknown never counts as
+  evidence for either side, so a healthy answer is `OK` only when the holder is positively the agent: a
+  running agent with a holder nobody could see is a warning. This shell's settings stand in for the agent's
+  only when nothing is installed at all (no property list and nothing loaded); an agent loaded without its
+  property list is not diagnosed with this shell's port. The installed agent's settings are loaded through
+  the guard `serve` applies to its own config directory (`cli._installed_settings_as_serve_sees_them`).
+  **The report as a whole obeys one invariant: a report with no failure has established that the dashboard
+  answers**, so "working" can never rest on a skipped port check. It is enforced once, at the end of
+  `diagnose` (`doctor._health_not_checked`), and not left to each path: the property list and launchd are
+  read at different moments, and an install that finishes between the reads leaves the settings saying
+  nothing is installed while the agent view says one runs, which skipped the port check with no failure of
+  its own. A loaded agent with no property list is
+  therefore a `FAIL`, not a warning (nothing says which port it serves), an unreachable launchd is not
+  taken for "nothing installed", and a remedy never points at another finding ("fix it above"), because
+  that finding may have none. `test_a_report_without_a_failure_has_established_that_the_dashboard_answers`
+  runs 224 combinations of launchd outcome, property-list state, shell settings, health result, and
+  holder; re-introducing either rule's bug fails it on exactly its own cases. Log lines are screened
+  before they are printed (`doctor.screen_for_sharing`) because the output is meant to be pasted publicly.
+  The names are `authorization`, `secret`, `token`, `cookie`, `credential`, `pass` + `word`/`wd`/`phrase`,
+  and `api`/`access`/`private` + `key`, each with an optional underscore, hyphen, or space between its
+  words (`API Key` was missed once); `scheme://user:password@` userinfo is replaced too
+  (`doctor._URL_CREDENTIALS`). There is no exemption for a remainder that looks like an exception type:
+  one was tried (a case-sensitive lookahead for a bare `...Error`) and a review showed `password:
+ValidError` passing it, because a type name cannot be told from a value by its shape. Its cost is that
+  a reason after a path holding a credential word, such as `1password-mcp: PermissionError`, is replaced.
+  That is accepted and recorded in `docs/known-limitations.md`; do not bring the exemption back.
+  After a credential-looking name the whole rest of the line is replaced and neither the value's syntax nor
+  the name's shape or length is parsed (the text before the separator has no limit, so `password[0]=`,
+  `DB_PASSWORD=`, and a long dotted field name all match; a 64-character allowance was tried and a review
+  showed a 70-character name passing it): four review rounds in a row found a syntax the previous
+  patch missed (a scheme plus a credential, an escaped quote, an index on the name, a long name). A log
+  line longer than the window is reported as too long, never shown cut (`doctor.tail_lines`): the cut end
+  may have lost the credential name that says its value is one. The screen reads no line longer than
+  `MAX_SCREENED_LINE_CHARACTERS` (4096): it is replaced whole by a note of its length. Six of sixteen
+  adversarial shapes were quadratic (the credential-name, email, URL-userinfo, and scheme patterns each
+  rescan from every start), and bounding the input is the close for the class; rewriting four patterns would
+  only wait for the fifth. The test is clock-free: every shape one character over the cap must be the note.
+  The agent snapshot has a boundary around each of its two reads (the property list, launchd), so an
+  unexpected error in one neither skips the other nor replaces the earlier, more specific finding, and one
+  around the whole (`_agent_view`). Untrusted text is split on `\n` only
+  (`tail_lines`, `_loopback_holder`), never with `str.splitlines`, which also splits on `\v`, `\f`, the
+  `\x1c`-`\x1e` separators, `\x85`, and U+2028/9 and so put `password=` and its value on different
+  "lines" before the screen saw them. The data directory is checked for who can look at it as well as who
+  can change it (`private.what_lets_another_account_look`: any group or other bit, or any ACL entry, is a
+  warning that names `agent install`, which makes it owner-only again); "safe to use" claims both. A nonzero `lsof` exit is no answer
+  (`doctor.port_holder`), and `doctor.path_findings` also asks what `agent install` would refuse for the
+  required `security` helper (`agent.helper_problems` → `executables.required_helper_problems`, which
+  calls `with_required_helpers(..., change_nothing=True)`: the one function install runs, so the two
+  cannot disagree; a first version restated its checks and a review found three cases it missed: an unsafe
+  entry beside the link, a data path holding the PATH separator, and a folder that does not exist yet).
+  `doctor._vendor_finding` likewise runs `execution_environment` (the PATH screen) and then
+  `checked_command`, as `rpc.JsonLineProcess` does, so a PATH directory the collector discards does not
+  supply a CLI in the report either. `test_install_refuses_exactly_what_the_check_reports` runs both modes
+  on each scenario and fails if their messages differ. That check is about a fresh install from this
+  shell. The installed agent prepares its own helper from its own recorded PATH and its own data directory,
+  and may differ from this shell in both, so `doctor.agent_helper_findings` asks the call its collector
+  makes: `execution_environment` with the served data directory as `helper_directory`, in the same
+  `change_nothing` mode (macOS only, where helpers are prepared). The PATH the collector screens
+  (`executables.screened_path`, which `execution_environment` applies to every child) is asked the same way:
+  `doctor.agent_path_findings` lists what it discards from the installed agent's recorded PATH, with one
+  builder (`doctor._omission_findings`) shared with the shell's own PATH check, because a pinned CLI still
+  found by its recorded path says nothing about the tools it starts by name from a discarded directory. The
+  `chmod` remedy for a CLI without the execute bit is quoted for a shell and offered only for a file this
+  account owns (`doctor._make_executable_fix`). These previews of install and of the collector are advisory
+  and never gate the "working" verdict; two known divergences (the helper preview judges the data directory
+  before install makes it private; the installed-PATH check attributes a CLI by the first match on the
+  recorded PATH) are accepted in `docs/known-limitations.md`, not missing checks. The whole rendered
+  report is screened, not only the log lines it quotes, because it also echoes settings values and paths.
+  Every finding field is also made one printable line when the report is formatted (`doctor._single_line`):
+  a path or message this package did not write can carry a newline, which would add a line of the report
+  that nothing produced (a forged `Result:` verdict), or an escape byte that drives the terminal. The install
+  wait checks its deadline before every probe (`cli._wait_until_answering`), so no probe starts at or after
+  it; a step already running is not cut short, which is why the docs say "about 20 seconds". `test_no_value_syntax_lets_a_secret_survive_the_screen_after_a_credential_name`
+  is the list a change must keep passing; add the next syntax there, not a new branch in the regex. `TestNothingIsClaimedThatTheEvidenceDoesNotAllow`
+  runs every combination (7 agent states, 3 holders, 6 health results) against stated invariants. Seven
+  review rounds on branch-by-branch logic each found the next unknown input; the table and that test are
+  the close for the class, and a mutation of either rule fails it. A holder is a listener the loopback
+  address reaches (`127.0.0.1` or `*`, from `lsof -Fpcn`); one bound to another interface is not. Two
+  different processes that both qualify are no holder at all (a connection reaches only one of them and the
+  output does not say which), so neither is blamed or cleared; one process listening twice is one holder.
+  The health request runs before the holder lookup, so a refusal and a holder seen afterwards are
+  contradictory evidence (a program began listening between them): that is its own failure, "refused the
+  health request, but something is listening on it now", and "nothing is listening" is claimed only when
+  no holder was seen. The state matrix asserts it for every combination.
+  The log section covers launchd's standard output and standard error and the server's own log, each tail
+  shown once. The README prompts are locked by `tests/test_readme_prompts.py` (an existing checkout is
+  verified before it is pulled, and doctor runs after every install whatever its exit status was). Each
+  prompt compares the checkout's remote silently (`[ "$(git remote get-url origin)" = <address> ]`, exit
+  status only): a remote can carry a credential, and printing it would put it in the agent's transcript
+  against the prompts' own rule. A real `git` with a synthetic credential in the remote proves it in the
+  tests. A missing data directory is checked for whether its nearest existing folder can be written to
+  (`doctor._missing_data_directory_finding`), because the ancestry walk only asks whether another account
+  could replace a level. Each
+  prompt's exact text is also locked by a SHA-256 digest there (`PROMPT_DIGESTS`): a list of forbidden
+  commands can never be complete, so editing a prompt, or appending anything to it, fails a test until a
+  person has read the new text as the agent will and set the digest on purpose. The failure message prints
+  the new digest. What the prompts deliberately do not defend against (a hostile process that can already
+  write to this account's checkout: local Git hooks, the ignored `.venv`) is a recorded non-goal in
+  `docs/known-limitations.md`, not a missing check; do not add hook or `.venv` verification to them
+  without widening the threat model there first. `doctor` deliberately does not preflight the install-only
+  prerequisites (the log directory, the launchd capture files, the property-list directory): install
+  validates them before it stops the running agent and says which one refused; `doctor` covers what a
+  running agent depends on and what an install leaves behind (record in `docs/known-limitations.md`).
+  `agent.parse_service_state` judges each value whole and never cuts it first (a text field over
+  `MAX_SERVICE_FIELD_LENGTH` is None; a number over `MAX_NUMBER_DIGITS` digits is None, which also keeps
+  `int` from raising); a process id must be positive, and a `pid` line that is not one makes the status
+  `UNKNOWN` (`ServiceState.pid_unreadable`), never `STOPPED`, because launchd did name a process.
+  An answer that does not come from the agent is a `FAIL` even when it is healthy. The one thing doctor
+  ever binds is a loopback port, briefly, to suggest a free one (`doctor.suggest_port`), and only when a
+  conflict is found. The remedy says to change `USAGEDASH_PORT` when this shell sets it to a non-empty
+  value, because it outranks the config file. Output shows
+  the home folder as `~` (`doctor.abbreviate_home`) because users paste it into issues. Logs are read
+  without following a link, without blocking, only as a regular file this account owns
+  (`doctor.tail_lines`), and control characters are replaced before printing. A new check goes in
+  `doctor.diagnose`, and its remedy must be a command the user can run. Do not suggest a remedy that
+  this package's own checks would refuse (naming a CLI under `[binaries]` does not make an unsafe
+  directory safe).
+- **launchd state is parsed from `launchctl print`, which is not a documented interface**
+  (`agent.parse_service_state`). Only fields indented by exactly one tab count, because the nested
+  coalition blocks carry a `state` of their own. A field not stated or not understood is `None`, and
+  `ServiceState.last_run_failed` is true only for a nonzero numeric exit or a signal. `agent status`
+  asks launchd once (`agent.service_state`): a second question (loaded, then its state) leaves a gap in
+  which a stopping service reads as loaded and not running. "Loaded" is never printed as "running"
+  without a pid, and a service that is not loaded stays one line.
 - **`agent uninstall` waits out `bootout`, then deletes the plist** (`agent.uninstall`). A stop that
   does not finish deletes nothing. `AgentStillLoadedError` means launchd still lists the service
   after the unload deadline, so it is left running. A failed stop whose outcome is unknown uses the
@@ -556,8 +736,11 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   deduplicated by canonical path. Empty PATH entries, missing directories, paths whose spelling or canonical
   form holds `:`, and directories another account could change are left out. Validation failures,
   including missing, unsafe, or unexaminable directories and canonical paths containing `:`, produce
-  warnings with reasons separated by semicolons. Empty entries and candidate paths
-  containing `:` before canonicalization are skipped silently.
+  warnings with reasons separated by semicolons. Empty entries are skipped silently. A candidate path
+  containing `:` before canonicalization is left out and reported like the others ("its path holds the PATH
+  separator"): it was silent once, and `doctor` then could not say why a command that CLI starts by name was
+  not found. It comes from a pinned CLI at a path with a colon, or from a relative entry resolved from a
+  working directory whose name has one.
   `executables.canonical_directory` checks the canonical directory and its
   ancestry, then `executables._refuse_an_executable_entry_another_account_could_change` scans its entries.
   Every regular file and link target must pass the path-based check, including non-executable files:
@@ -599,6 +782,16 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   that cannot be parsed, and a config that cannot be examined are one line (`cli._one_line`,
   `agent._path_exists`, `standing._config_file_is_present`). An interrupt in uninstall recovery still
   exits 130.
+- Tests that run `agent install` through `cli.main` must not reach this Mac's launchd or listener:
+  `TestCommandLine` stubs `cli._wait_until_answering` for every test, and a test of the wait itself
+  passes its own clock and fakes `agent.service_state` and `cli._dashboard_is_listening`
+  (`tests/test_diagnostics.py`). Without the stub the wait asks the developer's own running agent, and a
+  test passes or fails by whether the dashboard happens to be up.
+- On a Mac where `/usr/bin/uux` belongs to another account (seen on macOS 27), `/usr/bin` and `/usr/sbin`
+  are left off every agent PATH. That is the unsafe-directory rule working as written, and it is why the
+  install warning is long on such Macs. `security` is supplied through `agent-bin`; other `/usr/bin`
+  tools are not on the agent's PATH, so a vendor CLI that shells out to one by bare name may not find it
+  (not observed to fail; the running agent on that Mac has read quota with that PATH).
 - Lenient pydantic models all derive from `validation.LenientModel`; scanner skip rules live in
   `scanners/base.py`. Add to those, do not re-declare them per provider.
 - The HTTP client is `httpx2` (the maintained successor Starlette's test client now requires), not `httpx`.

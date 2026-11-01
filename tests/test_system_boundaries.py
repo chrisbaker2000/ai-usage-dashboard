@@ -4472,6 +4472,12 @@ def answers_health_checks(port: int) -> bool:
 
 
 class TestCommandLine:
+    @pytest.fixture(autouse=True)
+    def the_installed_agent_answers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Why: `agent install` waits for the new agent to answer. These tests fake launchd and never start a
+        # server, and the real wait would ask this machine's own agent and listener instead.
+        monkeypatch.setattr(cli, "_wait_until_answering", lambda _paths, _url: True)
+
     @pytest.fixture
     def data_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         data = tmp_path / "data"
@@ -4619,7 +4625,7 @@ class TestCommandLine:
     def test_the_package_can_be_run_as_a_module(
         self, data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(agent, "is_loaded", lambda _paths: False)
+        monkeypatch.setattr(agent, "service_state", lambda _paths: None)
         monkeypatch.setattr(sys, "argv", ["usagedash", "agent", "status"])
 
         with pytest.raises(SystemExit) as exited:
@@ -5550,7 +5556,7 @@ class TestCommandLine:
         action: str,
         defect: str,
     ) -> None:
-        monkeypatch.setattr(agent, "is_loaded", lambda _paths: False)
+        monkeypatch.setattr(agent, "service_state", lambda _paths: None)
         removed: list[agent.AgentPaths] = []
         monkeypatch.setattr(agent, "uninstall", removed.append)
         chosen: Path | None = None
@@ -5657,7 +5663,7 @@ class TestCommandLine:
     def test_agent_status_reports_whether_the_agent_is_loaded(
         self, data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(agent, "is_loaded", lambda _paths: False)
+        monkeypatch.setattr(agent, "service_state", lambda _paths: None)
         assert cli.main(["agent", "status"]) == 0
         assert capsys.readouterr().out.strip().endswith("not loaded")
 
@@ -6071,7 +6077,7 @@ class TestCommandLine:
         self, data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setenv("USAGEDASH_PORT", "80")
-        monkeypatch.setattr(agent, "is_loaded", lambda _paths: False)
+        monkeypatch.setattr(agent, "service_state", lambda _paths: None)
         removed: list[agent.AgentPaths] = []
         monkeypatch.setattr(agent, "uninstall", removed.append)
 
@@ -6788,7 +6794,7 @@ class TestCommandLine:
 
         assert capsys.readouterr().err == (
             f"error: nothing answered at http://127.0.0.1:{port}/; is the dashboard running? "
-            "Check `usagedash agent status`. Nothing was opened\n"
+            "Run `usagedash doctor` to find out why. Nothing was opened\n"
         )
         assert opened == []
         assert not (data_dir / "open-dashboard.html").exists()
@@ -6828,7 +6834,7 @@ class TestCommandLine:
 
         assert capsys.readouterr().err == (
             f"error: nothing answered at http://127.0.0.1:{listener.port}/; is the dashboard running? "
-            "Check `usagedash agent status`. Nothing was opened\n"
+            "Run `usagedash doctor` to find out why. Nothing was opened\n"
         )
         assert listener.paths == ["/healthz"]
         assert opened == []

@@ -1,5 +1,6 @@
 """Validate and freeze vendor executable selection before starting a child."""
 
+import errno
 import logging
 import os
 import shutil
@@ -242,8 +243,16 @@ def checked_executable(executable: Path, purpose: str) -> str:
     return str(executable)
 
 
-def with_required_helpers(search_path: str, working_directory: Path, helpers: Sequence[Path]) -> str:
-    """Expose checked required helpers privately; raise ConfigError for unsafe paths or preparation failures."""
+def with_required_helpers(
+    search_path: str, working_directory: Path, helpers: Sequence[Path], *, change_nothing: bool = False
+) -> str:
+    """Expose checked required helpers privately; raise ConfigError for unsafe paths or preparation failures.
+
+    With ``change_nothing`` the same checks run, in the same order, and nothing is created: a folder that does
+    not exist yet is judged by the path it would have, and a link that is not there yet is judged by the
+    target it would name. ``usagedash doctor`` asks this way, so what it says install would refuse is what
+    install refuses, and not a second statement of the rules.
+    """
     missing = [helper for helper in helpers if shutil.which(helper.name, path=search_path) is None]
     if not missing:
         return search_path
@@ -254,23 +263,58 @@ def with_required_helpers(search_path: str, working_directory: Path, helpers: Se
         try:
             directory.lstat()
         except FileNotFoundError:
+            if change_nothing:
+                return _with_helper_directory(search_path, directory.resolve())
             ensure_private_directory(directory)
         else:
             ensure_only_owner_can_change(directory)
         directory = directory.resolve(strict=True)
-        if os.pathsep in str(directory):
-            raise ConfigError("the required helper directory holds the PATH separator")
+        extended_path = _with_helper_directory(search_path, directory)
         for helper, target in zip(missing, targets, strict=True):
             link = directory / helper.name
+            if change_nothing:
+                if os.path.lexists(link):
+                    _refuse_an_unexpected_link(link, target)
+                elif not os.access(directory, os.W_OK | os.X_OK):
+                    raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(directory))
+                continue
             try:
                 link.symlink_to(target)
             except FileExistsError:
-                if Path(os.readlink(link)) != target:
-                    raise ConfigError(f"cannot use required helper {link}: it names an unexpected target") from None
+                _refuse_an_unexpected_link(link, target)
         canonical_directory(directory)
     except (OSError, RuntimeError, ValueError) as error:
         raise ConfigError(f"cannot prepare required helpers in {directory}: {type(error).__name__}") from error
+    return extended_path
+
+
+def _refuse_an_unexpected_link(link: Path, target: Path) -> None:
+    if Path(os.readlink(link)) != target:
+        raise ConfigError(f"cannot use required helper {link}: it names an unexpected target") from None
+
+
+def _with_helper_directory(search_path: str, directory: Path) -> str:
+    """Append ``directory`` to ``search_path``, refusing a directory whose own path holds the separator."""
+    if os.pathsep in str(directory):
+        raise ConfigError("the required helper directory holds the PATH separator")
     return os.pathsep.join(part for part in (search_path, str(directory)) if part)
+
+
+def required_helper_problems(search_path: str, working_directory: Path, helpers: Sequence[Path]) -> list[str]:
+    """Return what would stop ``with_required_helpers`` from supplying a helper, changing nothing.
+
+    This is that function in its ``change_nothing`` mode, so an unsafe helper, a private helper directory
+    another account could change, an unsafe entry beside the link, a data directory whose path holds the PATH
+    separator, and a link that names another target are all found by the code install runs. A helper already
+    on ``search_path`` needs none of it and reports nothing.
+    """
+    try:
+        with_required_helpers(search_path, working_directory, helpers, change_nothing=True)
+    except ConfigError as error:
+        return [str(error)]
+    except (OSError, RuntimeError, ValueError) as error:
+        return [f"cannot use a required helper: {type(error).__name__}"]
+    return []
 
 
 def _leave_out_of_child_path(directory: Path, error: ConfigError) -> None:
@@ -282,32 +326,52 @@ def _leave_out_of_child_path(directory: Path, error: ConfigError) -> None:
     logging.getLogger(__name__).warning("left out of the child PATH: %s: %s", directory, error)
 
 
-def execution_environment(
-    base: Mapping[str, str],
-    cwd: Path,
-    *,
-    helper_directory: Path | None = None,
-) -> dict[str, str]:
-    """Copy env with canonical checked PATH; inspect all regular files/links, omitting unsafe or colon paths.
-    Resolve relative entries from child cwd; use a non-directory sentinel when empty. Optional required
-    helpers live only in private dashboard data.
+def screened_path(path: str, cwd: Path) -> tuple[list[str], list[tuple[Path, ConfigError]]]:
+    """Split ``path`` into the directories a child may search and the ones left out, each with its reason.
 
-    Raises:
-        ConfigError: if required helpers cannot be prepared safely.
+    The admitted ones are canonical and deduplicated, in order. A relative or empty entry is read from ``cwd``.
+    A directory is left out when another account could change anything in it, when it cannot be examined, or
+    when its canonical path holds the PATH separator. This is the one screen: ``execution_environment`` applies
+    it to every child, and ``usagedash doctor`` asks it of the installed agent's recorded PATH to say what the
+    collector discards.
     """
     admitted: list[str] = []
-    for part in base.get("PATH", os.defpath).split(os.pathsep):
+    omitted: list[tuple[Path, ConfigError]] = []
+    for part in path.split(os.pathsep):
         directory = cwd / part
         try:
             canonical = canonical_directory(directory)
             if os.pathsep in str(canonical):
                 raise ConfigError("its canonical path holds the PATH separator")
         except ConfigError as error:
-            _leave_out_of_child_path(directory, error)
+            omitted.append((directory, error))
             continue
         if str(canonical) not in admitted:
             admitted.append(str(canonical))
+    return admitted, omitted
+
+
+def execution_environment(
+    base: Mapping[str, str],
+    cwd: Path,
+    *,
+    helper_directory: Path | None = None,
+    change_nothing: bool = False,
+) -> dict[str, str]:
+    """Copy env with canonical checked PATH; inspect all regular files/links, omitting unsafe or colon paths.
+    Resolve relative entries from child cwd; use a non-directory sentinel when empty. Optional required
+    helpers live only in private dashboard data. ``change_nothing`` runs the same checks on them and creates
+    nothing (see ``with_required_helpers``): ``usagedash doctor`` asks the call the collector makes, this way.
+
+    Raises:
+        ConfigError: if required helpers cannot be prepared safely.
+    """
+    admitted, omitted = screened_path(base.get("PATH", os.defpath), cwd)
+    for directory, error in omitted:
+        _leave_out_of_child_path(directory, error)
     search_path = os.pathsep.join(admitted)
     if helper_directory is not None and sys.platform == "darwin":
-        search_path = with_required_helpers(search_path, helper_directory, REQUIRED_PATH_HELPERS)
+        search_path = with_required_helpers(
+            search_path, helper_directory, REQUIRED_PATH_HELPERS, change_nothing=change_nothing
+        )
     return {**base, "PATH": search_path or os.devnull}

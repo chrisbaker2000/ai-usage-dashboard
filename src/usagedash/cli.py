@@ -19,7 +19,7 @@ from typing import TextIO
 import httpx2
 import uvicorn
 
-from usagedash import agent, standing
+from usagedash import agent, doctor, standing
 from usagedash.access import ensure_access_token, write_bootstrap_page
 from usagedash.api import HEALTH_PATH, build_state, create_app, severity_of
 from usagedash.config import (
@@ -47,7 +47,7 @@ from usagedash.wiring import build_collector
 
 DEFAULT_LOGIN_NAME = "standing"
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-LOG_FILE_NAME = "usagedash.log"
+LOG_FILE_NAME = agent.SERVER_LOG_NAME
 LOG_FILE_MAX_BYTES = 1_000_000
 LOG_FILE_BACKUPS = 3
 
@@ -56,6 +56,9 @@ EXIT_FAILURE = 1
 EXIT_INTERRUPTED = 130
 LIVENESS_TIMEOUT_SECONDS = 2.0
 """How long `usagedash open` waits for the dashboard to answer that it is running."""
+INSTALL_READY_WAIT_SECONDS = 20.0
+"""How long `usagedash agent install` waits for the new agent to answer before it reports a failure."""
+INSTALL_READY_POLL_SECONDS = 0.5
 FAILED_SOURCE_SEVERITIES = frozenset({"warning", "error"})
 
 
@@ -259,20 +262,50 @@ def _serve(settings: Settings) -> int:
     return EXIT_OK
 
 
-def _settings_the_installed_agent_serves() -> Settings | None:
-    """Overlay the installed plist's USAGEDASH settings on this shell, or return None when absent.
+def _environment_the_installed_agent_runs_with() -> tuple[dict[str, str], Path | None] | None:
+    """Overlay the installed plist's USAGEDASH settings on this shell's other variables, or None when absent.
+
+    Returns the environment and the home the agent recorded, which is what ``load_settings`` takes.
 
     Raises:
         AgentError: if a property list is present and cannot be read.
-        ConfigError: if the settings it names are not valid.
     """
     installed = agent.installed_environment(agent.agent_paths())
     if installed is None:
         return None
     shell = {name: value for name, value in os.environ.items() if not name.startswith(SETTINGS_ENV_PREFIX)}
     recorded_home = installed.get("HOME")
-    home = Path(recorded_home) if recorded_home is not None else None
-    return load_settings({**shell, **installed}, home=home)
+    return {**shell, **installed}, Path(recorded_home) if recorded_home is not None else None
+
+
+def _settings_the_installed_agent_serves() -> Settings | None:
+    """Load the settings the installed plist records, or return None when there is no property list.
+
+    Raises:
+        AgentError: if a property list is present and cannot be read.
+        ConfigError: if the settings it names are not valid.
+    """
+    served = _environment_the_installed_agent_runs_with()
+    return None if served is None else load_settings(served[0], home=served[1])
+
+
+def _installed_settings_as_serve_sees_them() -> Settings | None:
+    """Load the installed agent's settings after the guard ``serve`` applies to its own config directory.
+
+    The agent's config file can be somewhere else than this shell's: its plist may name one. ``serve`` refuses
+    to start when that directory could be replaced by another account, so a diagnosis that loads the settings
+    without the guard would call them fine and miss why the agent does not start.
+
+    Raises:
+        AgentError: if a property list is present and cannot be read.
+        ConfigError: if that config directory is unsafe or the settings it names are not valid.
+    """
+    served = _environment_the_installed_agent_runs_with()
+    if served is None:
+        return None
+    environment, home = served
+    standing._refuse_replaceable_config_directory(config_file(environment, home))
+    return load_settings(environment, home=home)
 
 
 def _same_dashboard(installed: Settings, invoked: Settings) -> bool:
@@ -355,7 +388,7 @@ def _open(settings: Settings) -> int:
 def _nothing_is_listening(dashboard_url: str) -> int:
     print(
         f"error: nothing answered at {dashboard_url}; is the dashboard running? "
-        "Check `usagedash agent status`. Nothing was opened",
+        "Run `usagedash doctor` to find out why. Nothing was opened",
         file=sys.stderr,
     )
     return EXIT_FAILURE
@@ -432,8 +465,78 @@ def _install_agent(settings: Settings) -> int:
     overrides["HOME"] = str(home)
     overrides |= _pinned_executables(executables)
     agent.install(paths, settings.data_dir, list(executables.values()), overrides)
-    print(f"Installed {paths.label} on http://{settings.host}:{settings.port}; run `usagedash open` to view it")
-    return EXIT_OK
+    dashboard_url = f"http://{settings.host}:{settings.port}/"
+    print(f"Started {paths.label}; waiting for it to answer at {dashboard_url}")
+    if _wait_until_answering(paths, dashboard_url):
+        print(f"Installed {paths.label} on http://{settings.host}:{settings.port}; run `usagedash open` to view it")
+        return EXIT_OK
+    print(
+        f"error: {paths.label} is installed, but the dashboard is not answering at {dashboard_url}. "
+        "launchd keeps the agent and starts it again, so a slow start may still clear. What was found:",
+        file=sys.stderr,
+    )
+    print(doctor.render_agent_failure(paths, settings.port, agent.account_home()), file=sys.stderr)
+    print("Run `usagedash doctor` for the full check.", file=sys.stderr)
+    return EXIT_FAILURE
+
+
+def _wait_until_answering(
+    paths: agent.AgentPaths,
+    dashboard_url: str,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Wait for the agent just started to answer ``/healthz``; give up at the deadline or once it has stopped.
+
+    ``bootstrap`` returns as soon as launchd has the service, before Python has imported anything, so
+    an install that returned there could not tell a slow start from one that crashed. A run that already
+    ended in failure ends the wait early: launchd waits ``RESTART_THROTTLE_SECONDS`` before the next try,
+    so waiting longer would only delay the report.
+
+    The deadline is checked before every probe and again after the launchd question, so no probe starts at or
+    after it and no sleep follows a deadline that a slow step crossed. A step already running is not cut short:
+    one health request takes up to ``LIVENESS_TIMEOUT_SECONDS`` and a launchd question can take up to its own
+    limit, so the wait is "about" the deadline, not exactly it.
+    """
+    deadline = monotonic() + INSTALL_READY_WAIT_SECONDS
+    while monotonic() < deadline:
+        if _dashboard_is_listening(dashboard_url):
+            return True
+        if _agent_has_stopped(paths) or monotonic() >= deadline:
+            return False
+        sleep(INSTALL_READY_POLL_SECONDS)
+    return False
+
+
+def _agent_has_stopped(paths: agent.AgentPaths) -> bool:
+    """Whether launchd lists the agent with no process and a run that ended in failure; unknown is not stopped."""
+    try:
+        state = agent.service_state(paths)
+    except UsageDashError:
+        return False
+    return state is not None and state.status is agent.AgentStatus.STOPPED and state.last_run_failed
+
+
+def _status_lines(paths: agent.AgentPaths, state: agent.ServiceState) -> list[str]:
+    """Describe a loaded agent from launchd's own fields; loaded does not mean running.
+
+    "Not running" is said only when the listing states a state other than running. A listing that says
+    nothing, or says running without a process id, is reported as not saying (``AgentStatus.UNKNOWN``).
+    """
+    if state.status is agent.AgentStatus.RUNNING:
+        headline = f"{paths.label}: running (pid {state.pid})"
+    elif state.status is agent.AgentStatus.UNKNOWN:
+        headline = f"{paths.label}: loaded; launchd's listing does not say whether it is running"
+    elif state.last_run_failed:
+        headline = f"{paths.label}: loaded, not running; the last run ended with {state.last_exit_description}"
+    else:
+        headline = f"{paths.label}: loaded, not running ({state.state})"
+    lines = [headline]
+    if state.runs is not None:
+        lines.append(f"  runs: {state.runs}")
+    lines.append(f"  logs: {paths.log_dir}")
+    lines.append("  Run `usagedash doctor` to check that it answers.")
+    return lines
 
 
 def _manage_installed_agent(action: str) -> int:
@@ -442,7 +545,13 @@ def _manage_installed_agent(action: str) -> int:
     """
     paths = agent.agent_paths()
     if action == "status":
-        print(f"{paths.label}: {'running' if agent.is_loaded(paths) else 'not loaded'}")
+        # Why one question: two (loaded, then its state) leave a gap in which a stopping service reads as
+        # loaded and not running.
+        state = agent.service_state(paths)
+        if state is None:
+            print(f"{paths.label}: not loaded")
+            return EXIT_OK
+        print("\n".join(_status_lines(paths, state)))
         return EXIT_OK
     removed = agent.uninstall(paths) or {}
     data_dir = removed.get(DATA_DIR_ENV)
@@ -451,6 +560,47 @@ def _manage_installed_agent(action: str) -> int:
         return EXIT_OK
     print(f"Removed {paths.label}; data in {data_dir} was kept")
     return EXIT_OK
+
+
+def _settings_outcome(load: Callable[[], Settings | None]) -> doctor.SettingsOutcome:
+    """Run a settings loader and hand back its error instead of raising, so one bad setting stops one check.
+
+    An error this package raised is returned as it is. Anything else (an unreadable file, a failed lookup) is
+    returned as a ``ConfigError`` that names only the exception's type: a traceback would end the report, and
+    the message of an error this package did not write can carry what a file or the environment supplied.
+    """
+    try:
+        return load()
+    except UsageDashError as error:
+        return error
+    except Exception as error:  # noqa: BLE001 - the boundary of the report, as ``doctor._guarded``
+        return ConfigError(f"the settings could not be read: {type(error).__name__}")
+
+
+def _shell_settings_as_install_sees_them() -> Settings:
+    """Load this shell's settings after the guard on the config directory that ``agent install`` applies first.
+
+    Raises:
+        ConfigError: if the config directory could be replaced by another account, or the settings are invalid.
+    """
+    standing._refuse_replaceable_config_directory(config_file())
+    return load_settings()
+
+
+def _doctor() -> int:
+    """Run every check and print the result. Nothing is started, stopped, installed, or created.
+
+    The config file and the property list are read as every command reads them, which makes an owner-owned
+    file that others can read owner-only.
+    """
+    paths = agent.agent_paths()
+    findings = doctor.diagnose(
+        paths,
+        shell=_settings_outcome(_shell_settings_as_install_sees_them),
+        served=_settings_outcome(_installed_settings_as_serve_sees_them),
+    )
+    print(doctor.render(findings, agent.account_home()))
+    return EXIT_FAILURE if doctor.has_failure(findings) else EXIT_OK
 
 
 def _settings_with_config(config_file: Path) -> Settings:
@@ -511,6 +661,7 @@ def _build_parser() -> argparse.ArgumentParser:
     commands.add_parser("collect", help="run one collection cycle and print the outcome")
     commands.add_parser("status", help="print the latest stored quota state")
     commands.add_parser("open", help="open the dashboard in your browser and sign the browser in")
+    commands.add_parser("doctor", help="check the installation and say what to fix; starts and stops nothing")
     agent_parser = commands.add_parser("agent", help="manage the launchd agent that keeps the dashboard running")
     agent_parser.add_argument("action", choices=["install", "uninstall", "status"])
     login_parser = commands.add_parser(
@@ -547,6 +698,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _manage_installed_agent(arguments.action)
         if arguments.command == "open":
             return _open(_settings_for_open())
+        if arguments.command == "doctor":
+            return _doctor()
         # Why before the file is parsed: the directory check does not look at the file's own mode, and
         # a path read from a file another account can replace is the path that then runs.
         if _runs_a_configured_program(arguments):

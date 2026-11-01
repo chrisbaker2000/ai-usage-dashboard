@@ -7,6 +7,7 @@ way that was already tried.
 - [A Claude response first seen after part of it has expired](#a-claude-response-first-seen-after-part-of-it-has-expired)
 - [A Codex map entry is kept when the main pool names no meter](#a-codex-map-entry-is-kept-when-the-main-pool-names-no-meter)
 - [The access token is created once and stays valid](#the-access-token-is-created-once-and-stays-valid)
+- [What `agent install` and `usagedash doctor` can and cannot tell you](#what-agent-install-and-usagedash-doctor-can-and-cannot-tell-you)
 - [The retail API cost uses the short-prompt standard rate](#the-retail-api-cost-uses-the-short-prompt-standard-rate)
 
 ## A Claude response first seen after part of it has expired
@@ -94,6 +95,128 @@ These designs were tried and withdrawn:
 - Freshness from the listener's challenge alone. A recorded answer replayed behind a re-issued
   challenge.
 - A tokenless served shell polling unsigned. A port holder could feed it fabricated data.
+
+## What `agent install` and `usagedash doctor` can and cannot tell you
+
+`agent install` exits 0 when `GET /healthz` on the agent's port answers 200 within about 20 seconds. No
+probe starts after the deadline, but a step already running is not cut short, so a slow health request
+(up to 2 seconds) or a slow `launchctl` call (up to its own 30-second limit) can run past it. That
+proves something answered the health check, not that the agent did. An older process still holding the
+port, such as a `usagedash serve` started by hand, answers it too. `usagedash doctor` compares the
+process holding the port with the agent's pid and reports a failure when they differ, or when the agent is
+not running at all and something else answers.
+
+- **An install that does not answer is not rolled back.** The new agent stays installed and launchd
+  keeps restarting it. A slow start can still come up, and removing the agent would remove the evidence
+  the user needs. The previous agent is not put back either, because it was already stopped.
+- **`doctor` can tighten a file's permissions, as every command can.** It reads the config file and the
+  agent's property list with the same reader as the rest of the commands
+  (`private.read_file_only_owner_can_change`). A file this account owns that other accounts can read is
+  made owner-only on that read; a file another account can write is refused and left as it is. So a
+  `doctor` run does not preserve a mode of 0644 for diagnosis.
+- **A data directory others can open is a warning, not a failure.** `doctor` fails when another account
+  can change the data directory, and warns when one can only look at it: any group or other permission
+  bit, or any access-control entry, including a deny or the owner's own. The files in it are owner-only
+  on their own, so what shows is the folder's listing and the sizes and times of what is in it. It does
+  not tighten the folder; `usagedash agent install` does, as every start of the server does. It also fails
+  when this account cannot write to the folder, since the database and its journal live there; a folder
+  this account cannot even open is reported as one that cannot be examined.
+- **`doctor` does not foresee every step `agent install` takes.** `agent install` validates all of these before
+  it stops or replaces the running agent: the interpreter, the log directory and its ancestors, the launchd
+  capture files (a symbolic link there is refused), the property-list directory and its ancestors, the
+  required helper, and the installation lock. When one refuses, the install fails at once with one line that
+  names the step and the path, so a failed install has its own diagnosis and a running older agent is left
+  as it was.
+  `doctor` is for what the install cannot say: an install that succeeded and does not answer, and what a
+  running agent depends on while it runs. That is why it checks the data directory (the database's journal
+  lives there for as long as the agent runs), the command line tools as the collector resolves them, and
+  the helper the collector prepares, and why it does not check the log directory, the capture files, or the
+  property-list directory beforehand: a symlinked capture log or an unsafe `~/Library/LaunchAgents` stops the
+  next `agent install` and nothing that is already running. A report can therefore end "working" while a
+  reinstall would be refused; the refusal is printed by the reinstall, not by `doctor`.
+- **`doctor`'s previews of what install and the collector will do are advisory, and where one differs from the
+  real step, the real step's message wins.** Two differences are known and accepted:
+  - _The helper preview judges the data directory as it is now._ `agent install` makes a data directory this
+    account owns private before it prepares the helper, so a directory that is owner-owned and currently
+    writable by another account can make the preview name a refusal that install repairs on its way. The same
+    directory is already a failure of its own in the report ("Another account can change the data directory"),
+    with the same fix, `usagedash agent install`, so the user is sent to the same command either way.
+  - _The installed-PATH check names a discarded directory as holding a vendor CLI when the first match by name
+    on the recorded PATH is in it._ The collector, having discarded that directory, may run a later copy of the
+    same CLI from a safe one, so "the tools it starts by name will not be found" may not apply. The directory is
+    still one the collector discards, and the fix it names (make it writable by you alone, then run
+    `usagedash agent install`) is correct and does no harm.
+
+  Neither preview is a gate: neither changes whether the dashboard is reported as working.
+
+- **The port holder is only what this account can see.** `doctor` asks `lsof`, which lists only this
+  account's processes without administrator rights, and counts only a listener that a connection to
+  `127.0.0.1` reaches. A holder it names is real; an absent holder is not proof the port is free, and it
+  is never taken for another program. A nonzero exit from `lsof` is no answer at all, even when it printed
+  a listener first: it exits 1 for "nothing listens" and for "could not examine everything", and a partial
+  list could name a holder that an unseen process shares the port with. With the agent running and no holder visible, a healthy answer is a
+  warning that doctor could not tell whether the agent gave it, not an all-clear. The probe of `/healthz`
+  is what says whether anything answers.
+- **launchd's state comes from `launchctl print`**, which Apple does not document as an interface. A
+  field the parser does not find is reported as not stated, and a run is called a failure only for a
+  nonzero numeric exit or a signal. A launchd release that renames a field makes `agent status` and the
+  early end of the install wait less specific; it does not stop the install from checking `/healthz`.
+- **The agent's logs are screened, not proven clean.** `doctor` prints the last lines of the agent's two
+  logs when something fails, because users paste the output into issues. The server logs error types and
+  route templates, never account ids or credentials, but a crash before logging starts can put a Python
+  traceback in `launchd-stderr.log`. Each line is screened first (`doctor.screen_for_sharing`): email
+  addresses, a value after `Bearer`, the user and password of a `scheme://user:password@` address, and
+  any run of 32 or more token characters are replaced, and after a name that holds `authorization`,
+  `secret`, `token`, `cookie`, `credential`, `password` (also `passwd`, `pass word`, `passphrase`), or an
+  `api`, `access`, or `private` key (`api_key`, `API-Key`, `API Key`, `apikey`) followed by anything but a
+  separator, of any length, so `DB_PASSWORD`, `password[0]`, a quoted name, and a long dotted field name
+  all match) and its `=` or `:`, **the rest of the line** is replaced. The same screen
+  runs over the whole report, not only the log lines, because the report also echoes settings values and
+  paths. Neither the value's syntax nor the name's shape or length is modelled: a screen that parses
+  either is bypassed by the next syntax (a scheme and a credential, an escaped quote, a comma inside the
+  value, an index on the name, a name past the allowance for one). The cost is the remainder of such a
+  line, including a remainder that is only an error type: `password: ValueError` cannot be told from a
+  password that is the word `ValueError`, so a reason such as `PermissionError` after
+  `/usr/local/bin/1password-mcp:` is replaced too, because that path holds the word `password`. A log
+  line longer than the window `doctor` reads (8 KiB) is reported as too long, with the path of the log,
+  and not shown, because the cut end of a line may have lost the name that says its value is a credential.
+  A line of more than 4096 characters, in a log or in any field of the report, is replaced whole by a note
+  of its length and is not read at all, for the same reason and because several of the screen's patterns
+  cost the square of a line's length (about two seconds at 48,000 characters before the cap). Two things
+  pass: a short credential printed under a name that holds none of those words, and a value
+  printed on a later line than its name. Nothing user-facing promises that the output holds no
+  credential: the home folder is shown as `~`, and the README and the bug template tell users to read the
+  output before posting it.
+
+## What the README prompts do not defend against (non-goals)
+
+The prompts in the README have a coding agent run `git`, `uv sync`, and `.venv/bin/usagedash` in the user's own
+checkout. That is code this account already owns and already runs. The project's threat model is another
+account on the same Mac, and everything private here is owner-only for that reason; it does not extend to a
+process that can already write to this account's files, because that process already runs code as the user and
+the prompts give it nothing it lacks.
+
+What the install and update prompts do check is what an outside party could change about **which code** is
+used: the checkout's remote is compared silently with the repository's address (never printed, since a remote
+can carry a credential), the tree must be clean, no commit may be on the checkout that is not on the
+repository's `main`, and the only merge is a fast-forward of `origin/main`. Their exact text is locked by
+digest in `tests/test_readme_prompts.py`.
+
+What they do not check, on purpose:
+
+- **Local Git hooks.** `.git/hooks` is not part of the tracked tree, so a clean `git status` says nothing about
+  it, and `git merge` runs a `post-merge` hook as the account. A hook there was put there by something that
+  could already write to `.git`.
+- **The ignored virtual environment.** `.venv` is ignored by Git, `git status` does not list it, and `uv sync`
+  does not reinstall a package that is already installed, so a changed `.venv/bin/usagedash` survives the
+  checks. Changing it takes write access to the checkout.
+- **The repair, account, and removal prompts run the checkout's `usagedash` without the checkout checks.**
+  They act on an install the user already runs: the agent they diagnose, sign in to, or remove is that same
+  code, started by launchd as the account. They never fetch, pull, or sync anything.
+
+If the threat model were widened to a hostile same-account process, it would also have to cover the shell
+profile, `~/.claude`, the keychain, and the launchd property list, which no prompt here can verify. That is a
+different project.
 
 ## The retail API cost uses the short-prompt standard rate
 

@@ -35,6 +35,7 @@ MACOS = "darwin"
 _NO_ACCESS_CONTROL_LISTS_HERE = frozenset({errno.ENOTSUP, errno.EOPNOTSUPP})
 _NO_ACCESS_CONTROL_LIST = _NO_ACCESS_CONTROL_LISTS_HERE | {errno.ENOENT}
 WRITABLE_BY_GROUP_OR_OTHERS = 0o022
+OPEN_TO_GROUP_OR_OTHERS = 0o077
 ADMINISTRATORS_GROUP = "admin"
 
 
@@ -212,6 +213,33 @@ def what_lets_another_account_change(
         raise ConfigError(f"cannot examine {path}: {type(error).__name__}") from error
     finally:
         os.close(descriptor)
+
+
+def what_lets_another_account_look(path: Path) -> str | None:
+    """Return what lets another account list or open the directory at ``path``, or None when only its owner can.
+
+    Owner-only is what ``ensure_private_directory`` makes a directory every time it runs: no group or other
+    permission bits and no access-control list. ``what_lets_another_account_change`` asks the narrower question
+    of what lets another account write, which is what decides whether the files in it can be replaced; this one
+    asks what exposes the folder's listing and the sizes and times of what is in it. Any access-control entry
+    counts, a deny or an owner's own too, because ``ensure_private_directory`` removes the whole list and a
+    directory that still has one is not as that function leaves it. The entry is not followed.
+
+    Raises:
+        ConfigError: if the entry cannot be examined.
+    """
+    try:
+        status = os.lstat(path)
+        listed = _access_control_text_of(path)
+    except (OSError, ValueError) as error:
+        raise ConfigError(f"cannot examine {path}: {type(error).__name__}") from error
+    if stat.S_ISLNK(status.st_mode):
+        return "it is a symbolic link"
+    if status.st_mode & OPEN_TO_GROUP_OR_OTHERS:
+        return f"its permissions ({stat.S_IMODE(status.st_mode):04o}) let other accounts open it"
+    if any(line.strip() and not line.startswith("!#") for line in listed.splitlines()):
+        return "it has an access-control list"
+    return None
 
 
 def what_lets_another_account_change_by_path(

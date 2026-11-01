@@ -14,11 +14,12 @@ import sys
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from xml.parsers.expat import ExpatError
 
 from usagedash.errors import ConfigError, UsageDashError
-from usagedash.executables import REQUIRED_PATH_HELPERS, with_required_helpers
+from usagedash.executables import REQUIRED_PATH_HELPERS, required_helper_problems, with_required_helpers
 from usagedash.executables import canonical_directory as _canonical_directory_only_this_account_can_change
 from usagedash.executables import checked_executable as _checked_executable
 from usagedash.private import (
@@ -41,6 +42,7 @@ SYSTEM_PATH_DIRECTORIES = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 _LOGGER = logging.getLogger(__name__)
 STANDARD_OUTPUT_LOG_NAME = "launchd-stdout.log"
 STANDARD_ERROR_LOG_NAME = "launchd-stderr.log"
+SERVER_LOG_NAME = "usagedash.log"
 # Why -P: with -m, Python puts the working directory first on its import path, and the agent's working
 # directory is the data directory. A file named like this package, left there while others could still
 # write to it, would be run in place of the dashboard, with its owner's access to every credential.
@@ -80,6 +82,11 @@ class AgentPaths:
     def launchd_logs(self) -> tuple[Path, Path]:
         """The files launchd sends the agent's standard output and standard error to."""
         return (self.log_dir / STANDARD_OUTPUT_LOG_NAME, self.log_dir / STANDARD_ERROR_LOG_NAME)
+
+    @property
+    def server_log(self) -> Path:
+        """The rotating log the server writes itself, apart from what launchd captures."""
+        return self.log_dir / SERVER_LOG_NAME
 
     @property
     def domain_target(self) -> str:
@@ -125,6 +132,15 @@ def agent_paths(home: Path | None = None, user: str | None = None) -> AgentPaths
     )
 
 
+@dataclass(frozen=True, slots=True)
+class PathOmission:
+    """One directory kept off the agent's PATH, why, and whether a vendor CLI was found in it."""
+
+    directory: str
+    reason: str
+    holds_vendor_cli: bool
+
+
 def agent_search_path(executables: Sequence[str], shell_path: str | None = None) -> str:
     """Build canonical PATH in shell, vendor, system order. Resolve relative shell entries and deduplicate.
 
@@ -132,32 +148,55 @@ def agent_search_path(executables: Sequence[str], shell_path: str | None = None)
     regular files and retained links without opening them; permit self/root ownership and admin writes.
     Canonical paths prevent alias retargeting. Installation separately supplies required lost helpers.
     """
+    search_path, omissions = _assemble_search_path(executables, shell_path)
+    if omissions:
+        _LOGGER.warning(
+            "left out of the agent's PATH, being missing or open to change by another account: %s",
+            "; ".join(f"{omission.directory}: {omission.reason}" for omission in omissions),
+        )
+    return search_path
+
+
+def agent_path_omissions(executables: Sequence[str], shell_path: str | None = None) -> list[PathOmission]:
+    """List what ``agent_search_path`` would leave off, without logging, for ``usagedash doctor``."""
+    return _assemble_search_path(executables, shell_path)[1]
+
+
+def helper_problems(executables: Sequence[str], working_directory: Path, shell_path: str | None = None) -> list[str]:
+    """List what would stop ``agent install`` from supplying a required helper, changing nothing.
+
+    The PATH is the one ``agent_search_path`` builds, so a helper that PATH loses (this Mac's ``/usr/bin``
+    when another account owns a file in it) is judged exactly as install judges it.
+    """
+    search_path, _ = _assemble_search_path(executables, shell_path)
+    return required_helper_problems(search_path, working_directory, REQUIRED_PATH_HELPERS)
+
+
+def _assemble_search_path(executables: Sequence[str], shell_path: str | None) -> tuple[str, list[PathOmission]]:
     shell_path = os.environ.get("PATH", "") if shell_path is None else shell_path
     resolved = (shutil.which(executable, path=shell_path) for executable in executables)
     needed = [str(Path(found).absolute().parent) for found in resolved if found is not None]
     in_shell_order = [str(Path(entry).absolute()) for entry in shell_path.split(os.pathsep) if entry]
     ordered: list[str] = []
-    left_out: list[str] = []
+    omissions: list[PathOmission] = []
     seen: set[str] = set()
     for directory in (*in_shell_order, *needed, *SYSTEM_PATH_DIRECTORIES):
-        if directory in seen or os.pathsep in directory:
+        if directory in seen:
             continue
         seen.add(directory)
+        if os.pathsep in directory:
+            omissions.append(PathOmission(directory, "its path holds the PATH separator", directory in needed))
+            continue
         try:
             canonical = _canonical_directory_only_this_account_can_change(Path(directory))
             if os.pathsep in str(canonical):
                 raise ConfigError("its canonical path holds the PATH separator")
         except ConfigError as error:
-            left_out.append(f"{directory}: {error}")
+            omissions.append(PathOmission(directory, str(error), holds_vendor_cli=directory in needed))
             continue
         if str(canonical) not in ordered:
             ordered.append(str(canonical))
-    if left_out:
-        _LOGGER.warning(
-            "left out of the agent's PATH, being missing or open to change by another account: %s",
-            "; ".join(left_out),
-        )
-    return os.pathsep.join(ordered)
+    return os.pathsep.join(ordered), omissions
 
 
 def _checked_python_executable() -> str:
@@ -290,18 +329,159 @@ def _one_change_at_a_time(paths: AgentPaths) -> Iterator[None]:
         os.close(descriptor)
 
 
-def is_loaded(paths: AgentPaths) -> bool:
-    """Report presence; only launchd's no-such-service result proves absence.
+def _print_service(paths: AgentPaths) -> str | None:
+    """Return launchd's listing of the service, or None when launchd says it has no such service.
 
     Raises:
         AgentError: if launchctl cannot be run, or fails in any way other than finding no such service.
     """
     result = _launchctl("print", paths.service_target)
     if result.returncode == 0:
-        return True
+        return result.stdout or ""
     if result.returncode == LAUNCHCTL_NO_SUCH_SERVICE:
-        return False
+        return None
     raise AgentError(f"launchctl print failed ({result.returncode}): {result.stderr.strip()}")
+
+
+def is_loaded(paths: AgentPaths) -> bool:
+    """Report presence; only launchd's no-such-service result proves absence.
+
+    Raises:
+        AgentError: if launchctl cannot be run, or fails in any way other than finding no such service.
+    """
+    return _print_service(paths) is not None
+
+
+class AgentStatus(StrEnum):
+    """What a listing of the agent allows anyone to claim about its process.
+
+    ``STOPPED`` is claimed only when launchd stated a state other than running and named no process. A
+    listing that says nothing, or says running without a process id this parser could read, is ``UNKNOWN``:
+    it is neither evidence that the agent runs nor that it does not.
+    """
+
+    RUNNING = "running"
+    STOPPED = "stopped"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceState:
+    """What launchd says about the loaded agent. A field launchd did not state, or stated in a form this
+    parser does not know, is None: the listing is launchd's own format and not a documented interface.
+    """
+
+    state: str | None
+    pid: int | None
+    runs: int | None
+    last_exit: str | None
+    last_signal: str | None
+    pid_unreadable: bool = False
+    """The listing has a ``pid`` line this parser could not read as a process id (``pid = 0``, a negative or
+    overlong number, text). A process may exist, so the agent is not claimed to be stopped."""
+
+    @property
+    def status(self) -> AgentStatus:
+        """The one place that turns a listing into a claim about the process; every message follows it."""
+        if self.pid is not None:
+            return AgentStatus.RUNNING
+        if self.pid_unreadable:
+            return AgentStatus.UNKNOWN
+        if self.state not in (None, "running"):
+            return AgentStatus.STOPPED
+        return AgentStatus.UNKNOWN
+
+    @property
+    def last_run_failed(self) -> bool:
+        """Whether the previous run ended with a nonzero exit status or a signal.
+
+        ``(never exited)`` and a zero status are not failures. A status this parser cannot read as a number
+        is not called a failure either, because the claim would rest on a guess.
+        """
+        if self.last_signal not in _NO_SIGNAL:
+            return True
+        exit_code = _whole_number(self.last_exit)
+        return exit_code is not None and exit_code != 0
+
+    @property
+    def last_exit_description(self) -> str:
+        """How the previous run ended in words: the signal when it was killed by one, else its exit code."""
+        if self.last_signal not in _NO_SIGNAL:
+            return f"signal {self.last_signal}"
+        return f"exit code {self.last_exit}"
+
+
+_NO_SIGNAL = (None, "", "(none)", "(never signalled)")
+
+
+_SERVICE_FIELD = re.compile(
+    r"^\t(state|pid|runs|last exit code|last terminating signal) = (.*)$",
+    re.MULTILINE,
+)
+MAX_SERVICE_FIELD_LENGTH = 80
+MAX_NUMBER_DIGITS = 18
+"""The most digits a field is read as a number from: enough for any process id, run count, or exit status, and
+far below the length at which ``int`` raises ``ValueError``."""
+
+
+def parse_service_state(listing: str) -> ServiceState:
+    """Read the service's own top-level fields from a ``launchctl print`` listing.
+
+    Only fields indented by exactly one tab count: nested blocks such as the coalitions carry a ``state``
+    of their own, and the first top-level occurrence of a name wins.
+
+    A value is judged whole, never cut first: cut to ``MAX_SERVICE_FIELD_LENGTH`` before it is read, eighty
+    digits and a letter would be a number. A text field longer than that is not understood, so it is None, and
+    a ``pid`` line that is not a positive number leaves the process unknown and not absent.
+    """
+    fields: dict[str, str] = {}
+    for match in _SERVICE_FIELD.finditer(listing):
+        fields.setdefault(match.group(1), match.group(2).strip())
+    stated_pid = fields.get("pid")
+    pid = _process_id(stated_pid)
+    return ServiceState(
+        state=_shown(fields.get("state")),
+        pid=pid,
+        runs=_count(fields.get("runs")),
+        last_exit=_shown(fields.get("last exit code")),
+        last_signal=_shown(fields.get("last terminating signal")),
+        pid_unreadable=stated_pid is not None and pid is None,
+    )
+
+
+def _shown(text: str | None) -> str | None:
+    return None if text is None or len(text) > MAX_SERVICE_FIELD_LENGTH else text
+
+
+def _process_id(text: str | None) -> int | None:
+    number = _whole_number(text)
+    return number if number is not None and number > 0 else None
+
+
+def _count(text: str | None) -> int | None:
+    number = _whole_number(text)
+    return number if number is not None and number >= 0 else None
+
+
+def _whole_number(text: str | None) -> int | None:
+    if text is None:
+        return None
+    stripped = text.strip()
+    negative = stripped.startswith("-")
+    digits = stripped[1:] if negative else stripped
+    if not digits.isascii() or not digits.isdecimal() or len(digits) > MAX_NUMBER_DIGITS:
+        return None
+    return -int(digits) if negative else int(digits)
+
+
+def service_state(paths: AgentPaths) -> ServiceState | None:
+    """Return what launchd says about the agent, or None when launchd does not list it.
+
+    Raises:
+        AgentError: if launchctl cannot be run, or fails in any way other than finding no such service.
+    """
+    listing = _print_service(paths)
+    return None if listing is None else parse_service_state(listing)
 
 
 def install(
