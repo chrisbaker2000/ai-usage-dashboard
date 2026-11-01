@@ -6,6 +6,8 @@ review found missing once, so editing the prose cannot quietly remove it.
 
 import hashlib
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -79,10 +81,10 @@ class TestEveryPromptIsPresentAndForbidsTheDangerousThings:
 
 
 PROMPT_DIGESTS = {
-    "install": "203dfb265dcc6967cb7257fb5ec6aeb3cdab48591f81db002465da13638f4c79",
+    "install": "65449ef45bc755a5f510bfcd5cdf22f02d770ab548225bb877c61281445eb586",
     "repair": "bdeb24335421a69096ec831afbd89436203007ff7d9c787924d9757ef5118cda",
     "account": "b202cf8f00ae02cae505893da8b327e43f3c9e9ed2333fd812fe9b08fd92e2a8",
-    "update": "5fc09847faa79438847126b0ab2b29d4b2ff7363d809dcc37f4c4228fd51e108",
+    "update": "e45da9f340c892c22d11ce5c92782a86ba237d18cd41210eca7485ff38f109ef",
     "remove": "f182fc9e9f0a989686e77781dd5df0f4f44093ca8d0507a2a11278f741db02fc",
 }
 """SHA-256 of each prompt's exact text. A list of forbidden commands can never be complete (``python3 -c``,
@@ -189,12 +191,13 @@ class TestNothingOutsideTheProhibitionNamesADangerousCommand:
 def verification(git: str) -> str:
     """The exact sentence that verifies an existing checkout, for ``git`` as the prompt spells the command."""
     return (
-        f"verify it before anything else: `{git} remote get-url origin` must print {REPOSITORY_ADDRESS} "
-        f"(or the same address without .git), `{git} status --porcelain` must print nothing, and after "
+        f'verify it before anything else: `[ "$({git} remote get-url origin)" = {REPOSITORY_ADDRESS} ]` must exit 0 '
+        "and print nothing (never print the remote's address, which can carry a credential), "
+        f"`{git} status --porcelain` must print nothing, and after "
         f"`{git} fetch origin main`, `{git} merge-base --is-ancestor HEAD origin/main` must exit 0, which means "
         "the checkout holds no commit that is not on the repository's main branch. If any of the three fails, "
-        "stop and tell me, and do not pull, sync, or run anything from that folder. Otherwise run "
-        f"`{git} merge --ff-only origin/main`"
+        "stop and tell me without showing the remote's address, and do not pull, sync, or run anything from "
+        f"that folder. Otherwise run `{git} merge --ff-only origin/main`"
     )
 
 
@@ -226,6 +229,42 @@ class TestTheInstallAndUpdatePromptsRunOnlyTheRightCheckout:
         assert REPOSITORY_ADDRESS in sentence
 
     @pytest.mark.parametrize("name", CHECKOUT_RULES)
+    def test_the_remote_is_compared_silently_and_its_address_is_never_asked_to_be_printed(self, name: str) -> None:
+        text = prompt_starting(PROMPT_STARTS[name])
+
+        remote_commands = re.findall(r"`([^`]*remote get-url[^`]*)`", text)
+        assert len(remote_commands) == 1
+        assert re.fullmatch(
+            rf'\[ "\$\(git [^"]*remote get-url origin\)" = {re.escape(REPOSITORY_ADDRESS)} \]', remote_commands[0]
+        )
+        assert "must print " + REPOSITORY_ADDRESS not in text
+        assert "never print the remote's address, which can carry a credential" in text
+        assert text.count("without showing the remote's address") == 1
+
+    @pytest.mark.parametrize("name", CHECKOUT_RULES)
+    def test_a_credential_in_the_remote_never_reaches_the_terminal_when_the_check_runs(
+        self, name: str, tmp_path: Path
+    ) -> None:
+        git = shutil.which("git")
+        if git is None:
+            pytest.skip("git is not installed")
+        repository = tmp_path / "checkout"
+        subprocess.run([git, "init", "-q", str(repository)], check=True, capture_output=True)
+        synthetic = "https://sample:synthetic-value@example.invalid/chrisbaker2000/ai-usage-dashboard.git"
+        subprocess.run(
+            [git, "-C", str(repository), "remote", "add", "origin", synthetic], check=True, capture_output=True
+        )
+        command = re.findall(r"`([^`]*remote get-url[^`]*)`", prompt_starting(PROMPT_STARTS[name]))[0]
+        command = command.replace("git -C ~/Developer/ai-usage-dashboard", f"git -C {repository}")
+        command = command.replace("$(git remote", f"$(git -C {repository} remote")
+
+        result = subprocess.run(["/bin/sh", "-c", command], capture_output=True, text=True, check=False)
+
+        assert result.returncode != 0
+        assert "synthetic-value" not in result.stdout + result.stderr
+        assert result.stdout == ""
+
+    @pytest.mark.parametrize("name", CHECKOUT_RULES)
     def test_nothing_is_pulled_and_the_only_merge_is_a_fast_forward_of_origin_main(self, name: str) -> None:
         text = prompt_starting(PROMPT_STARTS[name])
 
@@ -238,7 +277,8 @@ class TestTheInstallAndUpdatePromptsRunOnlyTheRightCheckout:
         [
             ("must print nothing", "may print anything"),
             ("must exit 0", "may exit 1"),
-            ("stop and tell me, and do not pull", "continue, and pull"),
+            ("stop and tell me without showing the remote's address, and do not pull", "continue, and pull"),
+            ("never print the remote's address", "print the remote's address"),
             ("Otherwise run", "Whatever the result, run"),
             ("verify it before anything else", "verify it afterwards"),
         ],

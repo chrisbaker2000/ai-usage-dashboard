@@ -1506,6 +1506,76 @@ class TestTheFullDiagnosis:
         assert only(findings, "does not exist yet").level is Level.INFO
         assert not (tmp_path / "data").exists()
 
+    def test_a_missing_data_directory_whose_nearest_folder_cannot_be_written_to_is_a_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        data = tmp_path / "data"
+        asked: list[tuple[Path, int]] = []
+
+        def cannot_write(path: Path, mode: int) -> bool:
+            asked.append((Path(path), mode))
+            return False
+
+        monkeypatch.setattr(doctor.os, "access", cannot_write)
+
+        [failure] = doctor.data_directory_findings(settings_for(tmp_path))
+
+        assert failure.level is Level.FAIL
+        assert failure.title == (
+            f"The data directory {data} does not exist and cannot be made: {tmp_path} is the nearest folder "
+            "that exists, and this account cannot write to it"
+        )
+        assert failure.fix == (
+            "Make that a folder you can write to, or point USAGEDASH_DATA_DIR at one, "
+            "then run `usagedash agent install`."
+        )
+        assert asked == [(tmp_path, os.W_OK | os.X_OK)]
+        assert not data.exists()
+
+    def test_the_nearest_folder_that_exists_is_the_one_asked_when_several_levels_are_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = load_settings(
+            {"USAGEDASH_DATA_DIR": str(tmp_path / "a" / "b" / "data"), "USAGEDASH_PORT": str(PORT)}, home=tmp_path
+        )
+        (tmp_path / "a").mkdir(mode=0o700)
+        asked: list[Path] = []
+
+        def cannot_write(path: Path, _mode: int) -> bool:
+            asked.append(Path(path))
+            return False
+
+        monkeypatch.setattr(doctor.os, "access", cannot_write)
+
+        [failure] = doctor.data_directory_findings(settings)
+
+        assert asked == [tmp_path / "a"]
+        assert f"{tmp_path / 'a'} is the nearest folder that exists" in failure.title
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can write to a folder with no write bit")
+    def test_a_read_only_parent_stops_the_data_directory_from_being_made_for_real(self, tmp_path: Path) -> None:
+        locked = tmp_path / "locked"
+        locked.mkdir(mode=0o700)
+        settings = load_settings(
+            {"USAGEDASH_DATA_DIR": str(locked / "data"), "USAGEDASH_PORT": str(PORT)}, home=tmp_path
+        )
+        locked.chmod(0o500)
+        try:
+            [finding] = doctor.data_directory_findings(settings)
+        finally:
+            locked.chmod(0o700)
+
+        assert finding.level is Level.FAIL
+        assert "this account cannot write to it" in finding.title
+
+    def test_a_missing_data_directory_under_a_folder_this_account_can_write_to_is_information(
+        self, tmp_path: Path
+    ) -> None:
+        [finding] = doctor.data_directory_findings(settings_for(tmp_path))
+
+        assert finding.level is Level.INFO
+        assert finding.title == f"The data directory {tmp_path / 'data'} does not exist yet; the first start makes it"
+
     def test_an_existing_data_directory_is_ok(self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine) -> None:
         (tmp_path / "data").mkdir(mode=0o700)
 

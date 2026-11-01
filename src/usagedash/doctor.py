@@ -372,6 +372,27 @@ def settings_findings(shell: SettingsOutcome, served: SettingsOutcome) -> list[F
     return findings
 
 
+def _missing_data_directory_finding(data_dir: Path) -> Finding:
+    """Say whether the first start can make the data directory that does not exist yet.
+
+    ``private.ensure_private_directory`` makes every missing level, so what matters is the nearest level that
+    exists: this account has to be able to write to it and open it. The ancestry walk asks whether another
+    account could replace a level, not whether this one can create below it, so a folder that is owner-owned
+    and mode 0500 passes that walk and still makes the install fail. A file in the way never gets here: a path
+    below one is not "missing", ``os.lstat`` raises ``NotADirectoryError`` for it, and that is its own finding.
+    """
+    anchor = next(parent for parent in data_dir.parents if os.path.lexists(parent))
+    if os.access(anchor, os.W_OK | os.X_OK):
+        return Finding(Level.INFO, f"The data directory {data_dir} does not exist yet; the first start makes it")
+    return Finding(
+        Level.FAIL,
+        f"The data directory {data_dir} does not exist and cannot be made: {anchor} is the nearest folder "
+        "that exists, and this account cannot write to it",
+        fix="Make that a folder you can write to, or point USAGEDASH_DATA_DIR at one, then run "
+        "`usagedash agent install`.",
+    )
+
+
 def data_directory_findings(settings: Settings) -> list[Finding]:
     """Check what ``agent install`` and the server require of the data directory, without creating it.
 
@@ -398,7 +419,7 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
     try:
         status = os.lstat(data_dir)
     except FileNotFoundError:
-        return [Finding(Level.INFO, f"The data directory {data_dir} does not exist yet; the first start makes it")]
+        return [_missing_data_directory_finding(data_dir)]
     except OSError as error:
         return [
             Finding(

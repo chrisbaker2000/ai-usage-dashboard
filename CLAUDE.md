@@ -262,6 +262,12 @@ ValidError` passing it, because a type name cannot be told from a value by its s
   The log section covers launchd's standard output and standard error and the server's own log, each tail
   shown once. The README prompts are locked by `tests/test_readme_prompts.py` (an existing checkout is
   verified before it is pulled, and doctor runs after every install whatever its exit status was). Each
+  prompt compares the checkout's remote silently (`[ "$(git remote get-url origin)" = <address> ]`, exit
+  status only): a remote can carry a credential, and printing it would put it in the agent's transcript
+  against the prompts' own rule. A real `git` with a synthetic credential in the remote proves it in the
+  tests. A missing data directory is checked for whether its nearest existing folder can be written to
+  (`doctor._missing_data_directory_finding`), because the ancestry walk only asks whether another account
+  could replace a level. Each
   prompt's exact text is also locked by a SHA-256 digest there (`PROMPT_DIGESTS`): a list of forbidden
   commands can never be complete, so editing a prompt, or appending anything to it, fails a test until a
   person has read the new text as the agent will and set the digest on purpose. The failure message prints
