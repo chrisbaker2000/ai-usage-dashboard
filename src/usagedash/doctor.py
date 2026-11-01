@@ -177,13 +177,13 @@ def _loopback_holder(output: str) -> PortHolder | None:
 
 
 _EMAIL_ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-_BEARER_VALUE = re.compile(r"(?i)\bbearer\s+\S+")
+_BEARER_VALUE = re.compile(r"(?i)\bbearer[ \t]+\S+")
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"""(?ix)
     (
         (?:authorization|api[_-]?key|secret|password|passwd)   # a credential name, inside any longer name
         [^=:\n]{0,64}                                          # what sits before the separator: [0], .value, a quote
-        [=:]\s*                                                # the separator
+        [=:][ \t]*                                             # the separator
     )
     .*                                                         # the rest of the line, whatever its syntax
     """
@@ -192,8 +192,17 @@ _TOKEN_LIKE = re.compile(r"[A-Za-z0-9_+=-]{32,}")
 REDACTED = "<redacted>"
 
 
-def screen_for_sharing(line: str) -> str:
-    """Replace what could be an email address or a credential in a log line that a user may post publicly.
+def screen_for_sharing(text: str) -> str:
+    """Screen each line of ``text`` on its own, so that nothing here can merge, remove, or add a line.
+
+    A line ending in ``password:`` must not swallow the next line, and a trailing ``Bearer`` must not take the
+    verdict label after it: the report is screened as a whole, and its structure is part of what it says.
+    """
+    return "\n".join(_screen_line(line) for line in text.split("\n"))
+
+
+def _screen_line(line: str) -> str:
+    """Replace what could be an email address or a credential in a line that a user may post publicly.
 
     The server and the launchd capture hold no credentials by design, but a crash before logging starts can put
     anything Python printed into the capture. This is a net, not a promise: it removes email addresses, a value
@@ -918,11 +927,11 @@ def _blocks(findings: Sequence[Finding]) -> str:
 
 
 def _shareable(text: str, home: Path) -> str:
-    """Screen the whole report, then show the home folder as ``~``, because users paste all of it into issues.
+    """Screen the whole report line by line, then show the home folder as ``~``: users paste all of it into issues.
 
     Log lines are screened as they are read, but the report also echoes what an invalid setting was set to and
     the paths it names, and either can hold an email address or something that looks like a credential. The
-    screen is idempotent, so a line screened twice reads the same.
+    screen is idempotent, so a line screened twice reads the same, and it keeps the report's lines as they are.
     """
     return abbreviate_home(screen_for_sharing(text), home)
 

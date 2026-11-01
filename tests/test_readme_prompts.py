@@ -34,34 +34,65 @@ PROMPT_STARTS = {
 }
 
 
+FORBIDDEN_TOOLS = (
+    "Do not use sudo, edit the launchd property list by hand, run launchctl yourself, or change the repository's code."
+)
+"""The exact sentence, because ``"sudo" in text`` is also true of a prompt that says to use it."""
+RESTRICTION_ON_TOOLS = {
+    "install": FORBIDDEN_TOOLS,
+    "repair": FORBIDDEN_TOOLS,
+    "account": FORBIDDEN_TOOLS,
+    "update": "do not use sudo or change the repository's code",
+    "remove": "Do not use sudo or run launchctl yourself.",
+}
+CREDENTIALS_RULE = "Never read, print, copy, or send credentials"
+
+
 class TestEveryPromptIsPresentAndForbidsTheDangerousThings:
     @pytest.mark.parametrize("name", PROMPT_STARTS)
     def test_the_prompt_exists_exactly_once(self, name: str) -> None:
         assert prompt_starting(PROMPT_STARTS[name])
 
-    @pytest.mark.parametrize("name", ["install", "repair", "account", "update", "remove"])
-    def test_no_prompt_lets_the_agent_use_sudo_or_run_launchctl_by_hand(self, name: str) -> None:
+    @pytest.mark.parametrize("name", RESTRICTION_ON_TOOLS)
+    def test_the_prompt_forbids_sudo_and_hand_run_launchctl_in_so_many_words(self, name: str) -> None:
         text = prompt_starting(PROMPT_STARTS[name])
 
-        assert "sudo" in text
-        assert "launchctl" in text or name in {"update"}
+        assert RESTRICTION_ON_TOOLS[name] in text
+        assert not re.search(r"(?<!not )\buse sudo\b", text, flags=re.IGNORECASE)
 
     @pytest.mark.parametrize("name", ["install", "repair", "account", "update"])
     def test_no_prompt_that_touches_credentials_lets_the_agent_read_or_send_them(self, name: str) -> None:
-        assert "Never read, print, copy, or send credentials" in prompt_starting(PROMPT_STARTS[name])
+        assert CREDENTIALS_RULE in prompt_starting(PROMPT_STARTS[name])
+
+    def test_the_account_prompt_never_signs_in_for_the_user(self) -> None:
+        text = prompt_starting(PROMPT_STARTS["account"])
+
+        assert "never try to sign in for me" in text
+        assert "never ask for or handle a password, code, or token" in text
+
+    def test_the_remove_prompt_keeps_the_users_data_and_leaves_deleting_it_to_them(self) -> None:
+        text = prompt_starting(PROMPT_STARTS["remove"])
+
+        assert "Do not delete the repository folder" in text
+        assert "deleting them is my choice" in text
 
 
 class TestTheInstallAndUpdatePromptsRunOnlyTheRightCheckout:
     @pytest.mark.parametrize("name", ["install", "update"])
-    def test_an_existing_checkout_is_verified_before_anything_is_pulled_or_run(self, name: str) -> None:
+    def test_an_existing_checkout_is_verified_in_order_before_anything_is_pulled_or_run(self, name: str) -> None:
         text = prompt_starting(PROMPT_STARTS[name])
 
-        assert "remote get-url origin" in text
+        steps = [
+            "remote get-url origin",
+            "status --porcelain",
+            "If either check fails, stop and tell me, and do not pull, sync, or run anything from that folder",
+            "git pull --ff-only",
+            "uv sync",
+        ]
+        positions = [text.index(step) for step in steps]
+        assert positions == sorted(positions)
         assert REPOSITORY_ADDRESS in text
-        assert "status --porcelain" in text
-        assert "do not pull, sync, or run anything from that folder" in text
-        assert "git pull --ff-only" in text
-        assert text.index("remote get-url origin") < text.index("git pull --ff-only")
+        assert "prints nothing" in text
 
     @pytest.mark.parametrize("name", ["install", "update"])
     def test_a_plain_pull_that_would_merge_is_never_used(self, name: str) -> None:

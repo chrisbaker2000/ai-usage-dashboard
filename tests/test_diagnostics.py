@@ -6,6 +6,7 @@ holder are faked, and the health probe runs against sockets opened inside the te
 
 import logging
 import os
+import re
 import socket
 import stat
 import threading
@@ -1897,6 +1898,45 @@ class TestReadingALog:
 
         assert secret not in screened
         assert doctor.REDACTED in screened
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "password:\nthe next line",
+            "password=\n       -> the remedy",
+            "Bearer\nResult: all 1 checks passed.",
+            "bearer \nResult: all 1 checks passed.",
+            "api_key :\n\n\nthe line after two blank ones",
+            "secret\t:\t\nafter a tab",
+            "first\npassword:\nsecond\nBearer\nResult: 1 problem found.",
+            "authorization:\r\nafter a carriage return",
+            "\n\npassword:\n\n",
+            "",
+        ],
+    )
+    def test_screening_never_merges_removes_or_adds_a_line(self, text: str) -> None:
+        screened = doctor.screen_for_sharing(text)
+
+        before, after = text.split("\n"), screened.split("\n")
+        assert len(after) == len(before)
+        for original, kept in zip(before, after, strict=True):
+            if not re.search(r"(?i)password|secret|api_key|authorization|bearer", original):
+                assert kept == original
+
+    def test_a_trailing_credential_name_does_not_take_the_verdict_or_the_remedy_after_it(self, tmp_path: Path) -> None:
+        findings = [
+            Finding(Level.INFO, "Last lines of the log", ("2026-11-01 INFO something: password:",)),
+            Finding(Level.FAIL, "something failed", ("Authorization:",), "Run `usagedash agent install` again."),
+            Finding(Level.WARN, "a trailing word", ("it ends in Bearer",)),
+        ]
+
+        report = doctor.render(findings, tmp_path)
+
+        assert "-> Run `usagedash agent install` again." in report
+        assert "[WARN] a trailing word" in report
+        assert [line for line in report.splitlines() if line.startswith("Result:")] == [
+            "Result: 1 problem found. Fix the first FAIL above, then run `usagedash doctor` again."
+        ]
 
     def test_a_credential_name_up_to_64_characters_before_its_separator_is_matched_and_one_more_is_not(self) -> None:
         within = "password" + " a" * 32 + "=v"
