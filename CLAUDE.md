@@ -177,7 +177,11 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   tightening is hardening, not a symptom a diagnosis should preserve. An untrusted property list is a
   `FAIL` and launchd is still asked, so a loaded or crashed agent keeps its pid and exit status in the
   report. Every check returns `Finding`s; an error
-  this package raised becomes a `FAIL` with its message, anything else is reported by type. It runs
+  this package raised becomes a `FAIL` with its message, anything else is reported by type, and
+  `doctor._guarded` makes that true of every group of checks: one that raises an exception it does not
+  handle is a `FAIL` naming only the exception's type (never its message, which can carry what a CLI or a
+  file supplied), and every other check still runs. A vendor CLI whose resolution raises `OSError` is a
+  warning for that CLI alone. It runs
   before settings are loaded (like `status` and `agent uninstall`), so invalid settings are a finding
   and the agent checks still run. The port, the data directory, and the vendor CLIs checked are the installed
   agent's (its plist pins the CLIs), not this shell's; only the PATH check asks what an install from this
@@ -688,8 +692,11 @@ ValidError` passing it, because a type name cannot be told from a value by its s
   deduplicated by canonical path. Empty PATH entries, missing directories, paths whose spelling or canonical
   form holds `:`, and directories another account could change are left out. Validation failures,
   including missing, unsafe, or unexaminable directories and canonical paths containing `:`, produce
-  warnings with reasons separated by semicolons. Empty entries and candidate paths
-  containing `:` before canonicalization are skipped silently.
+  warnings with reasons separated by semicolons. Empty entries are skipped silently. A candidate path
+  containing `:` before canonicalization is left out and reported like the others ("its path holds the PATH
+  separator"): it was silent once, and `doctor` then could not say why a command that CLI starts by name was
+  not found. It comes from a pinned CLI at a path with a colon, or from a relative entry resolved from a
+  working directory whose name has one.
   `executables.canonical_directory` checks the canonical directory and its
   ancestry, then `executables._refuse_an_executable_entry_another_account_could_change` scans its entries.
   Every regular file and link target must pass the path-based check, including non-executable files:

@@ -525,6 +525,13 @@ def _vendor_finding(name: str, executable: str, agent_path: str, working_directo
                 fix=f"Install {name} again, then run `usagedash agent install`.",
             )
         return Finding(Level.WARN, f"{name}: {error}")
+    except OSError as error:
+        return Finding(
+            Level.WARN,
+            f"{name}: could not examine the executable: {type(error).__name__}",
+            ("The collector would fail to start it the same way.",),
+            f"Check the permissions of {name}'s folder, then run `usagedash doctor` again.",
+        )
     resolved = Path(command[0])
     if not os.path.isfile(resolved):
         return Finding(
@@ -931,13 +938,33 @@ def log_findings(paths: AgentPaths) -> list[Finding]:
     return findings
 
 
+def _guarded(what: str, check: Callable[[], list[Finding]]) -> list[Finding]:
+    """Run one group of checks; an exception it does not handle becomes a failure that names only its type.
+
+    One check that raises must not hide the rest of the report, and the report is what a user pastes into an
+    issue: an unexpected error's message can carry what a provider, a CLI, or a file supplied, so it is not
+    used. The type is enough to find the call; the checks that did run still print.
+    """
+    try:
+        return check()
+    except Exception as error:  # noqa: BLE001 - the boundary of a report; see the docstring
+        return [
+            Finding(
+                Level.FAIL,
+                f"The {what} check could not finish: {type(error).__name__}",
+                ("Every other check ran.",),
+                "Run `usagedash doctor` again, and if it ends the same way, post this report in an issue.",
+            )
+        ]
+
+
 def diagnose_agent(paths: AgentPaths, port: int | None) -> list[Finding]:
     """Check the agent, whether it answers, and its logs. Used alone after an install or an open that failed."""
     view = _agent_findings(paths)
     findings = list(view.findings)
     if port is not None:
-        findings.extend(_answer_findings(port, view))
-    findings.extend(log_findings(paths))
+        findings.extend(_guarded("port", lambda: _answer_findings(port, view)))
+    findings.extend(_guarded("log", lambda: log_findings(paths)))
     return findings
 
 
@@ -953,7 +980,10 @@ def diagnose(paths: AgentPaths, *, shell: SettingsOutcome, served: SettingsOutco
     a different installation while the agent already started may still be running.
     The PATH check stays with ``shell``: it asks what ``agent install`` would do if run from here.
     """
-    findings = [*system_findings(), *settings_findings(shell, served)]
+    findings = [
+        *_guarded("system", system_findings),
+        *_guarded("settings", lambda: settings_findings(shell, served)),
+    ]
     view = _agent_findings(paths)
     nothing_is_installed = served is None and view.state is None and view.status is AgentStatus.STOPPED
     effective = (
@@ -964,15 +994,17 @@ def diagnose(paths: AgentPaths, *, shell: SettingsOutcome, served: SettingsOutco
         else None
     )
     if effective is not None:
-        findings.extend(data_directory_findings(effective))
-        findings.extend(vendor_findings(effective, _agent_path(view.environment)))
+        findings.extend(_guarded("data directory", lambda: data_directory_findings(effective)))
+        findings.extend(
+            _guarded("command line tool", lambda: vendor_findings(effective, _agent_path(view.environment)))
+        )
     if isinstance(shell, Settings):
-        findings.extend(path_findings(shell))
+        findings.extend(_guarded("PATH", lambda: path_findings(shell)))
     findings.extend(view.findings)
     if effective is not None:
-        findings.extend(_answer_findings(effective.port, view))
+        findings.extend(_guarded("port", lambda: _answer_findings(effective.port, view)))
     if has_failure(findings):
-        findings.extend(log_findings(paths))
+        findings.extend(_guarded("log", lambda: log_findings(paths)))
     return findings
 
 

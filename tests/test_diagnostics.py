@@ -211,6 +211,69 @@ class TestPathOmissions:
 
         assert str(kept) not in omitted
 
+    def test_a_vendor_cli_directory_whose_path_holds_the_separator_is_an_omission_and_not_a_silent_skip(
+        self, tmp_path: Path
+    ) -> None:
+        directory = tmp_path / "a:b"
+        self.executable(directory, "claude")
+
+        omissions = agent.agent_path_omissions([str(directory / "claude")], "")
+
+        assert [omission for omission in omissions if omission.directory == str(directory)] == [
+            agent.PathOmission(str(directory), "its path holds the PATH separator", holds_vendor_cli=True)
+        ]
+
+    def test_a_relative_entry_resolved_into_a_folder_whose_name_holds_the_separator_is_an_omission(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        work = tmp_path / "x:y"
+        (work / "bin").mkdir(parents=True)
+        monkeypatch.chdir(work)
+
+        omissions = agent.agent_path_omissions([], "bin")
+
+        assert [
+            (omission.directory, omission.holds_vendor_cli) for omission in omissions if "x:y" in omission.directory
+        ] == [(str(Path.cwd() / "bin"), False)]
+
+    def test_the_install_warning_names_a_directory_whose_path_holds_the_separator_and_leaves_it_off(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        directory = tmp_path / "a:b"
+        self.executable(directory, "claude")
+
+        with caplog.at_level("WARNING", logger="usagedash.agent"):
+            search_path = agent.agent_search_path([str(directory / "claude")], "")
+
+        assert str(directory) not in search_path.split(os.pathsep)
+        assert f"{directory}: its path holds the PATH separator" in " ".join(caplog.messages)
+
+    def test_a_directory_is_reported_once_however_often_it_is_named(self, tmp_path: Path) -> None:
+        directory = tmp_path / "a:b"
+        self.executable(directory, "claude")
+        pins = [str(directory / "claude"), str(directory / "claude")]
+
+        omissions = agent.agent_path_omissions(pins, "")
+
+        assert [omission.directory for omission in omissions].count(str(directory)) == 1
+
+    def test_doctor_names_a_vendor_cli_directory_the_agent_path_cannot_hold(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        directory = tmp_path / "a:b"
+        self.executable(directory, "claude")
+        monkeypatch.setattr(agent, "helper_problems", lambda _executables, _directory, _shell_path=None: [])
+        settings = replace(settings_for(tmp_path), binaries=Binaries(str(directory / "claude"), "codex", "grok"))
+
+        [finding] = [
+            found
+            for found in doctor.path_findings(settings)
+            if found.title.startswith("The directory of a vendor CLI") and str(directory) in found.title
+        ]
+
+        assert finding.level is Level.WARN
+        assert finding.details[0] == "its path holds the PATH separator"
+
 
 class TestRequiredHelpers:
     """What would stop ``agent install`` from supplying `security`, found without changing anything."""
@@ -1910,6 +1973,100 @@ class TestTheFullDiagnosis:
         findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
 
         assert only(findings, "codex: not found").level is Level.INFO
+
+    def test_an_os_error_while_resolving_one_cli_is_a_warning_for_that_cli_and_the_others_are_still_checked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = doctor.checked_command
+
+        def resolve(
+            command: list[str], environment: dict[str, str], directory: Path, *, fallback_name: str | None = None
+        ) -> list[str]:
+            if command == ["claude"]:
+                raise PermissionError("password=hunter2")
+            return real(command, environment, directory, fallback_name=fallback_name)
+
+        monkeypatch.setattr(doctor, "checked_command", resolve)
+
+        findings = doctor.vendor_findings(settings_for(tmp_path), "")
+
+        warning = only(findings, "claude: ")
+        assert warning.level is Level.WARN
+        assert warning.title == "claude: could not examine the executable: PermissionError"
+        assert warning.fix == "Check the permissions of claude's folder, then run `usagedash doctor` again."
+        assert "hunter2" not in repr(findings)
+        assert only(findings, "codex: not found").level is Level.INFO
+        assert only(findings, "grok: not found").level is Level.INFO
+
+    @pytest.mark.parametrize(
+        ("function", "what"),
+        [
+            ("system_findings", "system"),
+            ("settings_findings", "settings"),
+            ("data_directory_findings", "data directory"),
+            ("vendor_findings", "command line tool"),
+            ("path_findings", "PATH"),
+            ("_answer_findings", "port"),
+        ],
+    )
+    def test_a_check_that_raises_is_a_failure_naming_only_its_type_and_every_other_check_still_runs(
+        self,
+        tmp_path: Path,
+        paths: agent.AgentPaths,
+        machine: Machine,
+        monkeypatch: pytest.MonkeyPatch,
+        function: str,
+        what: str,
+    ) -> None:
+        def explode(*_arguments: object, **_keywords: object) -> list[Finding]:
+            raise RuntimeError("password=hunter2")
+
+        machine.running()
+        monkeypatch.setattr(doctor, function, explode)
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=settings_for(tmp_path))
+
+        [failure] = [found for found in findings if f"The {what} check could not finish" in found.title]
+        assert failure.level is Level.FAIL
+        assert failure.title == f"The {what} check could not finish: RuntimeError"
+        assert failure.details == ("Every other check ran.",)
+        assert failure.fix == "Run `usagedash doctor` again, and if it ends the same way, post this report in an issue."
+        assert "hunter2" not in repr(findings)
+        assert len(findings) > 3
+        assert "launchd is running the agent (pid 838)" in titles(findings)
+
+    def test_a_log_check_that_raises_is_a_failure_too(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        machine.health = HealthResult(HealthKind.REFUSED)
+
+        def explode(_paths: agent.AgentPaths) -> list[Finding]:
+            raise RuntimeError("password=hunter2")
+
+        monkeypatch.setattr(doctor, "log_findings", explode)
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=settings_for(tmp_path))
+
+        assert "The log check could not finish: RuntimeError" in titles(findings, Level.FAIL)
+        assert "hunter2" not in repr(findings)
+
+    def test_the_checks_after_an_install_are_guarded_the_same_way(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def explode(*_arguments: object, **_keywords: object) -> list[Finding]:
+            raise RuntimeError("password=hunter2")
+
+        machine.running()
+        monkeypatch.setattr(doctor, "_answer_findings", explode)
+        monkeypatch.setattr(doctor, "log_findings", explode)
+
+        findings = doctor.diagnose_agent(paths, PORT)
+
+        assert titles(findings, Level.FAIL) == [
+            "The port check could not finish: RuntimeError",
+            "The log check could not finish: RuntimeError",
+        ]
+        assert "hunter2" not in repr(findings)
 
     def test_a_pin_whose_file_was_removed_is_judged_by_the_replacement_the_agent_finds(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, caplog: pytest.LogCaptureFixture

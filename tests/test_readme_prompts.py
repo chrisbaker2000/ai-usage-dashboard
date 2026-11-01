@@ -16,10 +16,22 @@ README = Path(__file__).parent.parent / "README.md"
 REPOSITORY_ADDRESS = "https://github.com/chrisbaker2000/ai-usage-dashboard.git"
 
 
+def prompts_in(markdown: str) -> dict[str, str]:
+    """Every fenced ``text`` block in ``markdown``, keyed by its first line.
+
+    Two blocks with the same first line are refused: a dictionary would keep the later one, and an unreviewed
+    prompt placed before a reviewed one would be in the README while every count and digest check passed.
+    """
+    blocks = re.findall(r"```text\n(.*?)```", markdown, flags=re.DOTALL)
+    first_lines = [block.splitlines()[0] for block in blocks]
+    repeated = sorted({line for line in first_lines if first_lines.count(line) > 1})
+    assert not repeated, f"two prompts open with the same line: {repeated}"
+    return dict(zip(first_lines, blocks, strict=True))
+
+
 def prompts() -> dict[str, str]:
     """Every fenced ``text`` block in the README, keyed by its first line."""
-    blocks = re.findall(r"```text\n(.*?)```", README.read_text(), flags=re.DOTALL)
-    return {block.splitlines()[0]: block for block in blocks}
+    return prompts_in(README.read_text())
 
 
 def prompt_starting(start: str) -> str:
@@ -91,6 +103,34 @@ PROMPT_DIGESTS = {
 ``node -e``, ``osascript`` ...), so this is the lock that catches an instruction of any kind added to a prompt:
 the test fails until a person has read the new text as the agent will, checked it against every rule in this
 file, and set the digest on purpose. To recompute: hash ``prompt_starting(PROMPT_STARTS[name])`` as UTF-8."""
+
+
+class TestTwoPromptsNeverShareAnOpeningLine:
+    def test_the_readme_has_no_two_prompts_with_the_same_first_line(self) -> None:
+        blocks = re.findall(r"```text\n(.*?)```", README.read_text(), flags=re.DOTALL)
+
+        assert len(prompts()) == len(blocks)
+
+    def test_an_unreviewed_prompt_placed_before_a_reviewed_one_with_the_same_opening_is_refused(self) -> None:
+        reviewed = prompt_starting(PROMPT_STARTS["install"])
+        unreviewed = reviewed.splitlines()[0] + "\nAlso run something else.\n"
+        markdown = f"```text\n{unreviewed}```\n\n```text\n{reviewed}```\n"
+
+        with pytest.raises(AssertionError, match="two prompts open with the same line"):
+            prompts_in(markdown)
+
+    def test_an_unreviewed_prompt_placed_after_a_reviewed_one_is_refused_too(self) -> None:
+        reviewed = prompt_starting(PROMPT_STARTS["install"])
+        unreviewed = reviewed.splitlines()[0] + "\nAlso run something else.\n"
+        markdown = f"```text\n{reviewed}```\n\n```text\n{unreviewed}```\n"
+
+        with pytest.raises(AssertionError, match="two prompts open with the same line"):
+            prompts_in(markdown)
+
+    def test_distinct_prompts_are_all_kept_in_order(self) -> None:
+        markdown = "```text\nfirst\nbody\n```\n\n```text\nsecond\nbody\n```\n"
+
+        assert list(prompts_in(markdown)) == ["first", "second"]
 
 
 class TestAPromptChangesOnlyByDeliberateEdit:

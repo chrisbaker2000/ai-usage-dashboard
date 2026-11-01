@@ -181,9 +181,12 @@ def _assemble_search_path(executables: Sequence[str], shell_path: str | None) ->
     omissions: list[PathOmission] = []
     seen: set[str] = set()
     for directory in (*in_shell_order, *needed, *SYSTEM_PATH_DIRECTORIES):
-        if directory in seen or os.pathsep in directory:
+        if directory in seen:
             continue
         seen.add(directory)
+        if os.pathsep in directory:
+            omissions.append(PathOmission(directory, "its path holds the PATH separator", directory in needed))
+            continue
         try:
             canonical = _canonical_directory_only_this_account_can_change(Path(directory))
             if os.pathsep in str(canonical):
