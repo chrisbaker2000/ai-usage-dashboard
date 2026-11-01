@@ -4472,6 +4472,12 @@ def answers_health_checks(port: int) -> bool:
 
 
 class TestCommandLine:
+    @pytest.fixture(autouse=True)
+    def the_installed_agent_answers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Why: `agent install` waits for the new agent to answer. These tests fake launchd and never start a
+        # server, and the real wait would ask this machine's own agent and listener instead.
+        monkeypatch.setattr(cli, "_wait_until_answering", lambda _paths, _url: True)
+
     @pytest.fixture
     def data_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         data = tmp_path / "data"
@@ -6788,7 +6794,7 @@ class TestCommandLine:
 
         assert capsys.readouterr().err == (
             f"error: nothing answered at http://127.0.0.1:{port}/; is the dashboard running? "
-            "Check `usagedash agent status`. Nothing was opened\n"
+            "Run `usagedash doctor` to find out why. Nothing was opened\n"
         )
         assert opened == []
         assert not (data_dir / "open-dashboard.html").exists()
@@ -6828,7 +6834,7 @@ class TestCommandLine:
 
         assert capsys.readouterr().err == (
             f"error: nothing answered at http://127.0.0.1:{listener.port}/; is the dashboard running? "
-            "Check `usagedash agent status`. Nothing was opened\n"
+            "Run `usagedash doctor` to find out why. Nothing was opened\n"
         )
         assert listener.paths == ["/healthz"]
         assert opened == []

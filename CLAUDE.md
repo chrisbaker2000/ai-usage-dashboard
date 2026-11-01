@@ -18,6 +18,7 @@ prettier --write src/usagedash/static tests/js package.json
 .venv/bin/usagedash status
 .venv/bin/usagedash serve
 .venv/bin/usagedash open
+.venv/bin/usagedash doctor
 .venv/bin/usagedash login claude --name work
 .venv/bin/usagedash agent install
 .venv/bin/usagedash agent uninstall
@@ -47,6 +48,7 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
 | `private.py`                           | The one definition of owner-only directories and files; everything in the data directory uses it    |
 | `errors.py`                            | Typed errors. Anything a user can cause surfaces as a `UsageDashError`, never a raw exception       |
 | `standing.py`, `agent.py`, `cli.py`    | Standing-login setup, launchd agent, command line                                                   |
+| `doctor.py`                            | `usagedash doctor`: read-only checks that each say what is wrong and the command that fixes it      |
 | `executables.py`                       | Shared no-open executable trust checks and child PATH/cwd resolution                                |
 | `static/`                              | Vanilla JS page, ES modules, no build step; render-only, all decisions are made server-side         |
 | `static/{format,access,latest}.js`     | The page's pure logic (chart measures included), unit tested in `tests/js/`; `app.js` renders       |
@@ -157,6 +159,32 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   Install and uninstall share `agent._stop`, which checks a nonzero `bootout` result immediately: an absent service permits installation
   to continue; a loaded service or failed inspection raises into rollback. Only an accepted stop
   enters the unload polling loop. This avoids repeated 45-second waits after a rejected request.
+- **`agent install` returns only once the dashboard answers, or says why it did not**
+  (`cli._wait_until_answering`). `launchctl bootstrap` returns as soon as launchd has the service, before
+  Python has imported anything, so an install that stopped there reported "Installed" for an agent that
+  crashed on start or lost the port (a friend's install did, with only `open` failing afterwards). The wait
+  polls `/healthz` for `INSTALL_READY_WAIT_SECONDS` and ends at once on a run launchd lists as failed
+  (`agent.ServiceState.last_run_failed`), since launchd would not start it again for
+  `RESTART_THROTTLE_SECONDS`. Not answering exits 1 and prints `doctor.render_agent_failure` to standard
+  error. **It does not roll the agent back**: the new agent stays installed and launchd keeps restarting it,
+  because a slow start can still come up and a rollback would hide the log the user needs. An old process
+  that answers `/healthz` satisfies the wait; `doctor` names a port holder that is not the agent.
+- **`doctor` changes nothing and one check never hides another.** Every check returns `Finding`s; an error
+  this package raised becomes a `FAIL` with its message, anything else is reported by type. It runs
+  before settings are loaded (like `status` and `agent uninstall`), so invalid settings are a finding
+  and the agent checks still run. The port asked is the installed agent's, not this shell's. Output shows
+  the home folder as `~` (`doctor.abbreviate_home`) because users paste it into issues. Logs are read
+  without following a link, without blocking, only as a regular file this account owns
+  (`doctor.tail_lines`), and control characters are replaced before printing. A new check goes in
+  `doctor.diagnose`, and its remedy must be a command the user can run. Do not suggest a remedy that
+  this package's own checks would refuse (naming a CLI under `[binaries]` does not make an unsafe
+  directory safe).
+- **launchd state is parsed from `launchctl print`, which is not a documented interface**
+  (`agent.parse_service_state`). Only fields indented by exactly one tab count, because the nested
+  coalition blocks carry a `state` of their own. A field not stated or not understood is `None`, and
+  `ServiceState.last_run_failed` is true only for a nonzero numeric exit or a signal. `agent status`
+  asks `agent.is_loaded` first and `agent.service_state` second, so a service that is not loaded costs one
+  call and stays one line, and "loaded" is never printed as "running" without a pid.
 - **`agent uninstall` waits out `bootout`, then deletes the plist** (`agent.uninstall`). A stop that
   does not finish deletes nothing. `AgentStillLoadedError` means launchd still lists the service
   after the unload deadline, so it is left running. A failed stop whose outcome is unknown uses the
@@ -599,6 +627,16 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   that cannot be parsed, and a config that cannot be examined are one line (`cli._one_line`,
   `agent._path_exists`, `standing._config_file_is_present`). An interrupt in uninstall recovery still
   exits 130.
+- Tests that run `agent install` through `cli.main` must not reach this Mac's launchd or listener:
+  `TestCommandLine` stubs `cli._wait_until_answering` for every test, and a test of the wait itself
+  passes its own clock and fakes `agent.service_state` and `cli._dashboard_is_listening`
+  (`tests/test_diagnostics.py`). Without the stub the wait asks the developer's own running agent, and a
+  test passes or fails by whether the dashboard happens to be up.
+- On a Mac where `/usr/bin/uux` belongs to another account (seen on macOS 27), `/usr/bin` and `/usr/sbin`
+  are left off every agent PATH. That is the unsafe-directory rule working as written, and it is why the
+  install warning is long on such Macs. `security` is supplied through `agent-bin`; other `/usr/bin`
+  tools are not on the agent's PATH, so a vendor CLI that shells out to one by bare name may not find it
+  (not observed to fail; the running agent on that Mac has read quota with that PATH).
 - Lenient pydantic models all derive from `validation.LenientModel`; scanner skip rules live in
   `scanners/base.py`. Add to those, do not re-declare them per provider.
 - The HTTP client is `httpx2` (the maintained successor Starlette's test client now requires), not `httpx`.

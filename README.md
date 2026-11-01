@@ -21,7 +21,7 @@ _Real dashboard, synthetic demo accounts. Follows your Mac's light or dark appea
 - **Understand your usage.** Token history by account and model, with comparable retail API cost.
 - **Keep it local.** Your accounts and data stay on your Mac. No API key or frontend build required.
 
-[Install](#install) · [Add an account](#add-an-account) · [Security](SECURITY.md) · [Contribute](CONTRIBUTING.md)
+[Install](#install) · [Troubleshoot](#troubleshooting) · [Add an account](#add-an-account) · [Security](SECURITY.md) · [Contribute](CONTRIBUTING.md)
 
 The page is served on this Mac only, at <http://127.0.0.1:8787>, by a launchd agent that keeps
 collecting while you are logged in. It is not a shared or hosted service. Each person runs their own
@@ -39,6 +39,116 @@ You need:
   Check that each command you need (`claude`, `codex`, or `grok`) runs in this terminal. The page
   shows all three products even when a CLI is absent.
 
+Keep the clone out of Desktop, Documents, Downloads, and iCloud Drive: macOS can refuse to let a
+background agent read files there. A folder such as `~/Developer` is safe.
+
+### Let a coding agent install it
+
+Most people will want to hand this to a coding agent: Claude Code, Codex, Grok, or any agent that can
+run commands in a terminal. Start it in a terminal **on the Mac that should run the dashboard**, not
+in a cloud or sandboxed session, because the install registers a launchd agent for your macOS account
+on that Mac. Paste this prompt as it is:
+
+```text
+Install the AI usage dashboard on this Mac and open it. Repository: https://github.com/chrisbaker2000/ai-usage-dashboard
+
+Do each step, check its result, and stop at the first failure you cannot fix by following these instructions.
+
+1. Check this is macOS: `uname -s` must print Darwin.
+2. Check `uv --version` works. If uv is missing, run `brew install uv` when Homebrew is present. If Homebrew is not present, stop and tell me; do not run a downloaded installer script without asking me first.
+3. Clone the repository to ~/Developer/ai-usage-dashboard (create ~/Developer if needed). Never clone into Desktop, Documents, Downloads, or iCloud Drive: macOS can block a background agent from reading those. If the folder already exists, run `git pull` in it instead of cloning.
+4. In that folder run `uv sync`. If it says it cannot find Python 3.13, run `uv python install 3.13`, then `uv sync` again.
+5. In that folder run `.venv/bin/usagedash agent install`. Warnings about directories left off the agent's PATH are normal. The command waits up to 20 seconds for the dashboard and exits 0 only when the dashboard answers.
+6. If step 5 exits nonzero, run `.venv/bin/usagedash doctor` and read all of it. Fix the first line marked FAIL using the Troubleshooting section of README.md in the repository, then run `.venv/bin/usagedash agent install` and `.venv/bin/usagedash doctor` again. Repeat until doctor's last line starts with "Result: all" or "Result: working".
+7. Run `.venv/bin/usagedash open`.
+
+Rules:
+- Never read, print, copy, or send credentials: the contents of ~/.claude, ~/.codex, ~/.grok, the macOS keychain, the access-token file, or open-dashboard.html.
+- Do not use sudo, edit the launchd property list by hand, run launchctl yourself, or change the repository's code.
+- Do not change file permissions outside the repository folder. If a fix needs that, tell me what and why, and wait for me.
+- If you need something these steps do not cover, stop and ask me.
+
+When you finish, tell me: the last line of `usagedash doctor`, the address the dashboard is on, and which of the claude, codex, and grok CLIs doctor found.
+```
+
+The agent runs these commands as you, so read the prompt before you paste it. The other prompts are
+here when you need them.
+
+<details>
+<summary>Prompt: the install failed or the dashboard is not working</summary>
+
+```text
+The AI usage dashboard in ~/Developer/ai-usage-dashboard is not working. Find out why and fix it without changing its code.
+
+1. In that folder run `.venv/bin/usagedash doctor` and read all of it.
+2. Fix the first line marked FAIL using the Troubleshooting section of README.md in that folder. Then run `.venv/bin/usagedash agent install`, then `.venv/bin/usagedash doctor` again. Repeat until doctor's last line starts with "Result: all" or "Result: working".
+3. Run `.venv/bin/usagedash open`.
+
+Rules:
+- Never read, print, copy, or send credentials: the contents of ~/.claude, ~/.codex, ~/.grok, the macOS keychain, the access-token file, or open-dashboard.html.
+- Do not use sudo, edit the launchd property list by hand, run launchctl yourself, or change the repository's code.
+- Do not change file permissions outside the repository folder. If a fix needs that, tell me what and why, and wait for me.
+- If a fix is not in the Troubleshooting section, stop and show me the doctor output instead of guessing.
+
+When you finish, tell me what was wrong, what you changed, and the last line of `usagedash doctor`.
+```
+
+</details>
+
+<details>
+<summary>Prompt: add another Claude, Codex, or Grok account</summary>
+
+Signing in is interactive and needs you, so this prompt has the agent set it up and check it, and has
+you run the sign-in yourself. In Claude Code, type `!` before a command to run it in the session.
+
+```text
+Help me add another account to the AI usage dashboard in ~/Developer/ai-usage-dashboard. Signing in is interactive and needs me, so never try to sign in for me and never ask for or handle a password, code, or token.
+
+1. Ask me which product (claude, codex, or grok) and a short name for this login: 1 to 32 characters from a-z, 0-9, and "-", starting with a letter or a digit.
+2. Check the vendor CLI runs with `<product> --version`. If it does not, tell me to install it and stop.
+3. Tell me to run `.venv/bin/usagedash login <product> --name <name>` myself, in this folder, in a terminal I can see. Wait for me to say it finished.
+4. Then run `.venv/bin/usagedash doctor` and `.venv/bin/usagedash collect`, and tell me whether the new account reads ok.
+
+Rules:
+- Never read, print, copy, or send credentials: the contents of ~/.claude, ~/.codex, ~/.grok, the macOS keychain, the access-token file, or open-dashboard.html.
+- Do not use sudo, edit the launchd property list by hand, run launchctl yourself, or change the repository's code.
+```
+
+</details>
+
+<details>
+<summary>Prompt: update to the latest version</summary>
+
+```text
+Update the AI usage dashboard in ~/Developer/ai-usage-dashboard to the latest version.
+
+1. In that folder run `git pull`. If it reports local changes or a conflict, stop and tell me.
+2. Run `uv sync`.
+3. Run `.venv/bin/usagedash agent install`. It exits 0 only when the dashboard answers. If it exits nonzero, run `.venv/bin/usagedash doctor` and follow the Troubleshooting section of README.md.
+4. Run `.venv/bin/usagedash open`.
+
+Never read, print, copy, or send credentials, and do not use sudo or change the repository's code. When you finish, tell me the last line of `usagedash doctor`.
+```
+
+</details>
+
+<details>
+<summary>Prompt: remove the dashboard</summary>
+
+```text
+Remove the AI usage dashboard from this Mac, keeping my data.
+
+1. In ~/Developer/ai-usage-dashboard run `.venv/bin/usagedash agent uninstall`. It stops the launchd agent and removes its property list. Data and logs stay.
+2. Run `.venv/bin/usagedash agent status` and confirm it says "not loaded".
+3. Do not delete the repository folder, ~/Library/Application Support/ai-usage-dashboard, or ~/Library/Logs/ai-usage-dashboard. Tell me they are still there, and that deleting them is my choice.
+
+Do not use sudo or run launchctl yourself.
+```
+
+</details>
+
+### Install it yourself
+
 ```bash
 git clone https://github.com/chrisbaker2000/ai-usage-dashboard.git
 cd ai-usage-dashboard
@@ -49,15 +159,17 @@ uv sync
 
 Run `agent install` from a normal terminal, not a restricted environment. The agent records this
 shell's home directory, the CLIs it found, and a checked PATH. It starts now and again at each
-macOS login. Install
-warnings about directories left off PATH are expected when those directories are missing or another
-account could change them. The install succeeded when the command exits 0.
+macOS login. Install warnings about directories left off PATH are expected when those directories are
+missing or another account could change them. They are not errors.
+
+`agent install` then waits up to 20 seconds for the dashboard to answer. It exits 0 once it does, and
+that is the sign the install worked. If it exits 1, the agent is installed but nothing is serving
+yet. The output shows what launchd says and the last lines of the agent's logs, and
+`.venv/bin/usagedash doctor` explains the rest: see [Troubleshooting](#troubleshooting).
 
 `open` writes a private page and opens it in your browser. That file is the dashboard, and it is
-how this browser is allowed to read the server. If it reports that nothing answered, the agent is
-not up yet: run
-`.venv/bin/usagedash agent status`, then `agent install` again, then `open` again. A stopped agent
-does not write a page.
+how this browser is allowed to read the server. If it reports that nothing answered, run
+`.venv/bin/usagedash doctor`. A stopped agent does not write a page.
 
 The accounts already signed in as your working Claude (`~/.claude`), Codex (`~/.codex`), and Grok
 (`~/.grok`) logins are tracked with no extra step. The header says "Waiting for the first collection"
@@ -150,9 +262,10 @@ Run these from the repository directory.
 | Command                                   | What it does                                                             |
 | ----------------------------------------- | ------------------------------------------------------------------------ |
 | `.venv/bin/usagedash open`                | Open the private page in your browser.                                   |
+| `.venv/bin/usagedash doctor`              | Check the whole installation and say what to fix. Changes nothing.       |
 | `.venv/bin/usagedash status`              | Print the latest stored quota readings.                                  |
 | `.venv/bin/usagedash collect`             | Run one collection now and print the outcome.                            |
-| `.venv/bin/usagedash agent status`        | Say whether launchd has the agent loaded.                                |
+| `.venv/bin/usagedash agent status`        | Say whether launchd has the agent loaded and running, with pid and logs. |
 | `.venv/bin/usagedash agent install`       | Install or replace the agent and start it.                               |
 | `.venv/bin/usagedash agent uninstall`     | Stop the agent and remove its property list. Data and logs stay.         |
 | `.venv/bin/usagedash serve`               | Run the server in the foreground. The agent is the normal way to run it. |
@@ -274,6 +387,66 @@ To stop collection:
 
 That removes the launchd service and keeps the data directory and the logs. Installing again
 continues the same database.
+
+## Troubleshooting
+
+**Start with `.venv/bin/usagedash doctor`**, run from the repository folder. It checks the platform,
+your settings, the data folder, the three vendor CLIs, the agent in launchd, whether the dashboard
+answers, and who holds the port if it does not. Every line starts with `ok`, `info`, `WARN`, or
+`FAIL`, and a `FAIL` names the command that fixes it. Fix the first `FAIL`, then run doctor again.
+When something is wrong it also prints the last lines of the agent's logs. It exits 1 if anything
+failed and changes nothing on your Mac.
+
+The usual causes, by what you see:
+
+- **`uv: command not found`.** Install uv (`brew install uv`, or the
+  [uv instructions](https://docs.astral.sh/uv/getting-started/installation/)), open a new terminal,
+  and run `uv sync` again.
+- **`uv sync` cannot find Python 3.13.** Run `uv python install 3.13`, then `uv sync` again.
+- **`usagedash: command not found`.** The command lives in the repository's own environment. Run
+  `.venv/bin/usagedash …` from the repository folder, as every command here is written.
+- **A long warning about directories "left out of the agent's PATH".** This is normal and is not why
+  anything failed. The agent runs with only the PATH directories that you alone can change, so a
+  missing directory, or one another account could write to, is left off. Doctor lists them. It flags
+  only the case that matters: a directory that holds `claude`, `codex`, or `grok`, because the agent
+  then could not run that CLI. Make that directory writable by you alone, or move the CLI to one that
+  is, and run `agent install` again.
+- **`agent install` exits 1 with "is installed, but the dashboard is not answering".** The agent is
+  registered with launchd and nothing is serving yet. The output says what launchd reports and shows
+  the agent's last log lines. The causes are the next three items. Run `doctor` ten seconds later
+  to see the current state.
+- **The agent started and stopped (`exit code 1`).** The server crashed while starting, and launchd
+  tries again after 30 seconds, so it stops the same way until the cause is fixed. The log lines
+  doctor prints say why. Fix that, then run `agent install` again.
+- **Port 8787 is already in use** (doctor says "Port 8787 is held by …", or "Something other than the
+  dashboard answers"). Quit the program it names. Or move the dashboard to another port from 1024 to
+  65535: `USAGEDASH_PORT=8788 .venv/bin/usagedash agent install`, then `.venv/bin/usagedash open`.
+  The agent keeps that port, and `open` follows it. To keep it in the config file instead, set
+  `port = 8788` there.
+- **`open` says "nothing answered".** The agent is not running, is still starting, or something else
+  holds the port. Doctor tells you which. If you just ran `agent install` and it exited 0, the
+  dashboard was answering then, so the agent has stopped since: look at doctor's log lines.
+- **The dashboard stopped working after you moved or deleted the repository folder.** The agent runs
+  the Python in that folder's `.venv`. Run `uv sync` and `agent install` from where the folder is now.
+- **The repository is in Desktop, Documents, Downloads, or iCloud Drive.** macOS can refuse a
+  background agent access to those folders, so the agent cannot start. Move the folder, for example
+  to `~/Developer`, then run `uv sync` and `agent install` there.
+- **The header says "Waiting for the first collection".** The first collection runs when the agent
+  starts and then about every five minutes. If it stays there, `.venv/bin/usagedash collect` runs one
+  now and prints each source's outcome.
+- **A card says "No data", or Data sources lists a warning or an error.** `collect` prints each source
+  as `account`, `quota`, and `tokens`. "not logged in" means that CLI has no signed-in account on this
+  Mac: sign in with the vendor CLI as usual, or add the account with `usagedash login`. A source that
+  names a missing or unsafe executable is the CLI problem doctor lists under the vendor CLIs.
+- **"Claude Code reported no plan limits for this login".** See [Add an account](#add-an-account).
+- **You changed a setting and nothing changed.** The running agent keeps the settings it started
+  with. Run `agent install`, then `open`.
+- **The browser shows the page from before an update.** Run `open` again. A reload keeps the old copy.
+
+If doctor does not point at the cause, open an issue with the bug template and paste doctor's whole
+output. It shows your home folder as `~` and holds no tokens, but read it first and remove anything
+you would not share. Never paste `open-dashboard.html`, the access token, session files, or keychain
+contents.
 
 ## Security
 

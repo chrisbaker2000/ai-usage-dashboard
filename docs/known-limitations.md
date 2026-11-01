@@ -7,6 +7,7 @@ way that was already tried.
 - [A Claude response first seen after part of it has expired](#a-claude-response-first-seen-after-part-of-it-has-expired)
 - [A Codex map entry is kept when the main pool names no meter](#a-codex-map-entry-is-kept-when-the-main-pool-names-no-meter)
 - [The access token is created once and stays valid](#the-access-token-is-created-once-and-stays-valid)
+- [What `agent install` and `usagedash doctor` can and cannot tell you](#what-agent-install-and-usagedash-doctor-can-and-cannot-tell-you)
 - [The retail API cost uses the short-prompt standard rate](#the-retail-api-cost-uses-the-short-prompt-standard-rate)
 
 ## A Claude response first seen after part of it has expired
@@ -94,6 +95,28 @@ These designs were tried and withdrawn:
 - Freshness from the listener's challenge alone. A recorded answer replayed behind a re-issued
   challenge.
 - A tokenless served shell polling unsigned. A port holder could feed it fabricated data.
+
+## What `agent install` and `usagedash doctor` can and cannot tell you
+
+`agent install` exits 0 when `GET /healthz` on the agent's port answers 200 within 20 seconds. That
+proves something answered the health check, not that the agent did. An older process still holding the
+port, such as a `usagedash serve` started by hand, answers it too. `usagedash doctor` compares the
+process holding the port with the agent's pid and warns when they differ.
+
+- **An install that does not answer is not rolled back.** The new agent stays installed and launchd
+  keeps restarting it. A slow start can still come up, and removing the agent would remove the evidence
+  the user needs. The previous agent is not put back either, because it was already stopped.
+- **The port holder is only what this account can see.** `doctor` asks `lsof`, which lists only this
+  account's processes without administrator rights. A holder it names is real; an absent holder is not
+  proof the port is free. The probe of `/healthz` is what says whether anything answers.
+- **launchd's state comes from `launchctl print`**, which Apple does not document as an interface. A
+  field the parser does not find is reported as not stated, and a run is called a failure only for a
+  nonzero numeric exit or a signal. A launchd release that renames a field makes `agent status` and the
+  early end of the install wait less specific; it does not stop the install from checking `/healthz`.
+- **The agent's logs are shown, not scrubbed.** `doctor` prints the last lines of the agent's two logs
+  when something is wrong. The server logs error types and route templates, never account ids or
+  credentials, but a crash before logging starts can put a Python traceback in `launchd-stderr.log`.
+  `doctor` shows the home folder as `~` and the README tells users to read the output before posting it.
 
 ## The retail API cost uses the short-prompt standard rate
 
