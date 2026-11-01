@@ -80,7 +80,13 @@ SettingsOutcome = Settings | UsageDashError | None
 
 _RECOVER_THE_PROPERTY_LIST = (
     "Run `usagedash agent uninstall`, which removes a property list it cannot trust without starting it, then "
-    "`usagedash agent install`. `agent install` alone reads the same property list and stops at the same error."
+    "`usagedash agent install`. When the file is unsafe and not just unreadable, `agent install` alone reads it "
+    "through the same trust check and stops at the same error."
+)
+
+_CORRECT_THE_SETTING = (
+    "Correct the setting the message names, in the config file or in a USAGEDASH_* variable, then run "
+    "`usagedash agent install`: it records the settings this shell loads in place of the ones that no longer load."
 )
 
 
@@ -241,7 +247,7 @@ def settings_findings(shell: SettingsOutcome, served: SettingsOutcome) -> list[F
             Finding(
                 Level.FAIL,
                 f"The installed agent's settings cannot be read: {served}",
-                fix=_RECOVER_THE_PROPERTY_LIST,
+                fix=_RECOVER_THE_PROPERTY_LIST if isinstance(served, agent.AgentError) else _CORRECT_THE_SETTING,
             )
         )
     elif isinstance(shell, Settings) and served.port != shell.port:
@@ -540,18 +546,10 @@ def _answer_findings(port: int, state: ServiceState | None) -> list[Finding]:
     holder = port_holder(port)
     agent_pid = None if state is None else state.pid
     if health.kind is HealthKind.ANSWERED and health.status == HTTP_OK:
-        if holder is not None and agent_pid is not None and holder.pid != agent_pid:
-            return [
-                Finding(
-                    Level.WARN,
-                    f"The dashboard answers on port {port}, but the agent (pid {agent_pid}) is not the one holding it",
-                    (
-                        *_holder_detail(port, holder),
-                        "This is usually a `usagedash serve` started by hand, or an older agent still running.",
-                    ),
-                    "Quit that process, then run `usagedash agent install`.",
-                )
-            ]
+        if agent_pid is None:
+            return [_served_by_someone_else(port, holder, "the agent is not running, so something else is serving it")]
+        if holder is not None and holder.pid != agent_pid:
+            return [_served_by_someone_else(port, holder, f"the agent (pid {agent_pid}) is not the one holding it")]
         return [Finding(Level.OK, f"The dashboard answers on port {port}")]
     if health.kind is HealthKind.REFUSED and agent_pid is not None:
         return [
@@ -582,6 +580,23 @@ def _answer_findings(port: int, state: ServiceState | None) -> list[Finding]:
             )
         ]
     return [Finding(Level.FAIL, _port_trouble_title(port, health), _holder_detail(port, holder), _move_fix(port))]
+
+
+def _served_by_someone_else(port: int, holder: PortHolder | None, why: str) -> Finding:
+    """A healthy answer that does not come from the agent is a failure: the installed setup is not serving.
+
+    Whoever answers may be doing it well, but the agent is what keeps the dashboard up across logins, so
+    a report that ends in "working" would be wrong while it is not the one serving.
+    """
+    return Finding(
+        Level.FAIL,
+        f"The dashboard answers on port {port}, but {why}",
+        (
+            *_holder_detail(port, holder),
+            "This is usually a `usagedash serve` started by hand, or an older agent still running.",
+        ),
+        "Quit that process, then run `usagedash agent install`.",
+    )
 
 
 def _port_trouble_title(port: int, health: HealthResult) -> str:

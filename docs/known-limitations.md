@@ -101,7 +101,8 @@ These designs were tried and withdrawn:
 `agent install` exits 0 when `GET /healthz` on the agent's port answers 200 within 20 seconds. That
 proves something answered the health check, not that the agent did. An older process still holding the
 port, such as a `usagedash serve` started by hand, answers it too. `usagedash doctor` compares the
-process holding the port with the agent's pid and warns when they differ.
+process holding the port with the agent's pid and reports a failure when they differ, or when the agent is
+not running at all and something else answers.
 
 - **An install that does not answer is not rolled back.** The new agent stays installed and launchd
   keeps restarting it. A slow start can still come up, and removing the agent would remove the evidence

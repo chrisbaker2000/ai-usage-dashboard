@@ -20,7 +20,7 @@ from tests.fakes.fake_run import FakeRun
 from usagedash import agent, cli, doctor
 from usagedash.config import Binaries, Settings, load_settings
 from usagedash.doctor import Finding, HealthKind, HealthResult, Level, PortHolder
-from usagedash.errors import ConfigError
+from usagedash.errors import ConfigError, UsageDashError
 
 TAB = "\t"
 PORT = 9123
@@ -55,6 +55,10 @@ def launchctl_listing(
         "}",
     ]
     return "\n".join(rows) + "\n"
+
+
+class UsageDashErrorOfAnotherKind(UsageDashError):
+    """An error that is neither a ConfigError nor an AgentError, to show the remedy does not depend on those two."""
 
 
 RUNNING = agent.ServiceState("running", 838, 1, "(never exited)", None)
@@ -434,13 +438,27 @@ class TestTheAgentChecks:
         assert finding.fix is not None
         assert "`usagedash agent uninstall`" in finding.fix
         assert "removes a property list it cannot trust without starting it" in finding.fix
-        assert "`agent install` alone reads the same property list and stops at the same error" in finding.fix
+        assert "When the file is unsafe and not just unreadable, `agent install` alone reads it" in finding.fix
+        assert "through the same trust check and stops at the same error" in finding.fix
 
-    def test_installed_settings_that_cannot_be_read_get_the_same_way_out(self, tmp_path: Path) -> None:
-        findings = doctor.settings_findings(None, ConfigError("another account could change it"))
+    def test_installed_settings_that_cannot_be_read_because_the_property_list_cannot_are_cleared_with_uninstall(
+        self,
+    ) -> None:
+        findings = doctor.settings_findings(None, agent.AgentError("cannot use the plist: another account can write"))
 
-        assert findings[0].fix is not None
+        assert findings[0].fix == doctor._RECOVER_THE_PROPERTY_LIST
         assert "`usagedash agent uninstall`" in findings[0].fix
+
+    @pytest.mark.parametrize("error", [ConfigError("port must be an integer, got 'x'"), UsageDashErrorOfAnotherKind()])
+    def test_installed_settings_that_are_invalid_are_corrected_and_installed_again_not_uninstalled(
+        self, error: Exception
+    ) -> None:
+        assert isinstance(error, UsageDashError)
+
+        findings = doctor.settings_findings(None, error)
+
+        assert findings[0].fix == doctor._CORRECT_THE_SETTING
+        assert "uninstall" not in findings[0].fix
 
     def test_launchd_that_cannot_be_asked_names_what_to_check(
         self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
@@ -536,16 +554,62 @@ class TestWhetherTheDashboardAnswers:
         assert not [finding for finding in findings if finding.level in (Level.WARN, Level.FAIL)]
         assert machine.probed == [f"http://127.0.0.1:{PORT}/healthz"]
 
-    def test_an_answer_from_a_process_that_is_not_the_agent_is_a_warning_that_names_it(
+    def test_an_answer_from_a_process_that_is_not_the_agent_is_a_failure_that_names_it(
         self, paths: agent.AgentPaths, machine: Machine
     ) -> None:
         machine.holder = PortHolder(99, "python3.13")
 
         finding = only(doctor.diagnose_agent(paths, PORT), "is not the one holding it")
 
-        assert finding.level is Level.WARN
+        assert finding.level is Level.FAIL
+        assert (
+            finding.title == f"The dashboard answers on port {PORT}, but the agent (pid 838) is not the one holding it"
+        )
         assert "python3.13 (pid 99)" in finding.details[0]
         assert "usagedash serve" in finding.details[1]
+        assert finding.fix == "Quit that process, then run `usagedash agent install`."
+
+    @pytest.mark.parametrize(
+        "state",
+        [None, agent.ServiceState(None, None, None, None, None), CRASHED],
+        ids=["not loaded", "loaded but not running", "crashed"],
+    )
+    def test_a_healthy_answer_is_not_ok_while_the_agent_is_not_running_and_a_visible_process_serves_it(
+        self, paths: agent.AgentPaths, machine: Machine, state: agent.ServiceState | None
+    ) -> None:
+        machine.state, machine.holder = state, PortHolder(99, "python3.13")
+
+        findings = doctor.diagnose_agent(paths, PORT)
+
+        finding = only(findings, "the agent is not running")
+        assert finding.level is Level.FAIL
+        assert finding.title == (
+            f"The dashboard answers on port {PORT}, but the agent is not running, so something else is serving it"
+        )
+        assert finding.details[0] == f"Port {PORT} is held by python3.13 (pid 99)."
+        assert not [title for title in titles(findings) if title == f"The dashboard answers on port {PORT}"]
+
+    def test_a_healthy_answer_is_not_ok_while_the_agent_is_not_running_even_when_the_holder_cannot_be_seen(
+        self, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        machine.state, machine.holder = agent.ServiceState(None, None, None, None, None), None
+
+        finding = only(doctor.diagnose_agent(paths, PORT), "the agent is not running")
+
+        assert finding.level is Level.FAIL
+        assert not [detail for detail in finding.details if detail.startswith("Port ")]
+
+    def test_the_report_does_not_end_in_working_when_the_agent_is_not_the_one_serving(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        machine.state, machine.holder = agent.ServiceState(None, None, None, None, None), PortHolder(99, "python3.13")
+
+        findings = doctor.diagnose_agent(paths, PORT)
+        report = doctor.render(findings, tmp_path)
+
+        assert doctor.has_failure(findings) is True
+        assert "Result: working" not in report
+        assert "Result: 1 problem found." in report
 
     def test_another_program_answering_with_an_error_status_is_a_failure_that_names_it_and_a_new_port(
         self, paths: agent.AgentPaths, machine: Machine
@@ -734,13 +798,13 @@ class TestTheFullDiagnosis:
     def test_a_warning_alone_does_not_add_the_log_lines_to_the_report(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
     ) -> None:
-        machine.state = agent.ServiceState(None, None, None, None, None)
-        machine.health = HealthResult(HealthKind.ANSWERED, 200)
+        machine.environment = None
         write_log(paths.server_log, "2026-11-01 INFO usagedash.api: collected\n")
 
         findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
 
-        assert titles(findings, Level.WARN) == ["launchd lists the agent but is not running it"]
+        assert titles(findings, Level.WARN) == ["launchd lists an agent whose property list is gone"]
+        assert titles(findings, Level.FAIL) == []
         assert not [title for title in titles(findings) if title.startswith("Last lines")]
 
     def test_two_logs_that_end_the_same_way_are_shown_once(self, paths: agent.AgentPaths) -> None:
