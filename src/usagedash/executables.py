@@ -1,5 +1,6 @@
 """Validate and freeze vendor executable selection before starting a child."""
 
+import errno
 import logging
 import os
 import shutil
@@ -274,6 +275,8 @@ def with_required_helpers(
             if change_nothing:
                 if os.path.lexists(link):
                     _refuse_an_unexpected_link(link, target)
+                elif not os.access(directory, os.W_OK | os.X_OK):
+                    raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(directory))
                 continue
             try:
                 link.symlink_to(target)

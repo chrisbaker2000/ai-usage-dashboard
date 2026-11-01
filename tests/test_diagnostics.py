@@ -417,12 +417,17 @@ class TestRequiredHelpers:
 
         assert not working.exists()
 
-    @pytest.mark.parametrize("scenario", ["clean", "unexpected target", "unsafe sibling", "separator", "no helper"])
+    @pytest.mark.parametrize(
+        "scenario",
+        ["clean", "unexpected target", "unsafe sibling", "separator", "no helper", "read-only folder"],
+    )
     def test_install_refuses_exactly_what_the_check_reports(self, tmp_path: Path, helper: Path, scenario: str) -> None:
+        if scenario == "read-only folder" and os.geteuid() == 0:
+            pytest.skip("root can write to a folder with no write bit")
         working = tmp_path / ("a:b" if scenario == "separator" else "data")
         working.mkdir()
         folder = working / "agent-bin"
-        if scenario in ("unexpected target", "unsafe sibling"):
+        if scenario in ("unexpected target", "unsafe sibling", "read-only folder"):
             folder.mkdir(mode=0o700)
         if scenario == "unexpected target":
             (folder / "security").symlink_to(tmp_path / "somewhere-else")
@@ -430,15 +435,52 @@ class TestRequiredHelpers:
             executable_file(folder / "loose", mode=0o777)
         if scenario == "no helper":
             helper.chmod(0o644)
+        if scenario == "read-only folder":
+            folder.chmod(0o500)
 
-        reported = self.problems(helper, working)
+        try:
+            reported = self.problems(helper, working)
 
-        if reported:
-            with pytest.raises(ConfigError) as refused:
-                executables.with_required_helpers("", working, [helper])
-            assert [str(refused.value)] == reported
-        else:
-            assert executables.with_required_helpers("", working, [helper]).endswith(str(folder.resolve()))
+            if reported:
+                with pytest.raises(ConfigError) as refused:
+                    executables.with_required_helpers("", working, [helper])
+                assert [str(refused.value)] == reported
+            else:
+                assert executables.with_required_helpers("", working, [helper]).endswith(str(folder.resolve()))
+        finally:
+            if folder.exists():
+                folder.chmod(0o700)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can write to a folder with no write bit")
+    def test_a_helper_folder_this_account_cannot_write_to_is_a_problem_when_the_link_is_missing(
+        self, tmp_path: Path, helper: Path
+    ) -> None:
+        working = tmp_path / "data"
+        folder = working / "agent-bin"
+        folder.mkdir(parents=True, mode=0o700)
+        folder.chmod(0o500)
+        try:
+            problems = self.problems(helper, working)
+        finally:
+            folder.chmod(0o700)
+
+        assert problems == [f"cannot prepare required helpers in {folder}: PermissionError"]
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can write to a folder with no write bit")
+    def test_a_read_only_helper_folder_that_already_holds_the_right_link_is_no_problem(
+        self, tmp_path: Path, helper: Path
+    ) -> None:
+        working = tmp_path / "data"
+        folder = working / "agent-bin"
+        folder.mkdir(parents=True, mode=0o700)
+        (folder / "security").symlink_to(helper.resolve())
+        folder.chmod(0o500)
+        try:
+            problems = self.problems(helper, working)
+        finally:
+            folder.chmod(0o700)
+
+        assert problems == []
 
     def test_the_agent_asks_with_the_path_install_builds_and_changes_nothing(
         self, tmp_path: Path, helper: Path, monkeypatch: pytest.MonkeyPatch
@@ -2506,6 +2548,38 @@ class TestReadingALog:
     )
     def test_screening_replaces_what_could_be_a_credential_and_nothing_else(self, line: str, screened: str) -> None:
         assert doctor.screen_for_sharing(line) == screened
+
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "API Key",
+            "api key",
+            "Api-Key",
+            "apikey",
+            "API_KEY",
+            "Access Key",
+            "access-key",
+            "accesskey",
+            "Private Key",
+            "private_key",
+            "privatekey",
+            "Pass Word",
+            "pass word",
+            "PassWord",
+            "Passphrase",
+            "Pass Phrase",
+            "pass_phrase",
+            "pass-phrase",
+            "passwd",
+            "Pass Wd",
+            "password",
+        ],
+    )
+    @pytest.mark.parametrize("separator", [": ", "=", " = ", ":\t"])
+    def test_a_label_spelled_with_a_space_a_hyphen_an_underscore_or_nothing_is_matched(
+        self, label: str, separator: str
+    ) -> None:
+        assert doctor.screen_for_sharing(f"{label}{separator}short123") == f"{label}{separator}<redacted>"
 
     @pytest.mark.parametrize(
         "template",

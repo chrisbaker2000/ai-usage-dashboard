@@ -137,9 +137,10 @@ not running at all and something else answers.
   traceback in `launchd-stderr.log`. Each line is screened first (`doctor.screen_for_sharing`): email
   addresses, a value after `Bearer`, the user and password of a `scheme://user:password@` address, and
   any run of 32 or more token characters are replaced, and after a name that holds `authorization`,
-  `api_key`, `secret`, `password`, `passwd`, `token`, `cookie`, `credential`, or `private_key` (followed
-  by anything but a separator, of any length, so `DB_PASSWORD`, `password[0]`, a quoted name, and a long
-  dotted field name all match) and its `=` or `:`, **the rest of the line** is replaced. The same screen
+  `secret`, `token`, `cookie`, `credential`, `password` (also `passwd`, `pass word`, `passphrase`), or an
+  `api`, `access`, or `private` key (`api_key`, `API-Key`, `API Key`, `apikey`) followed by anything but a
+  separator, of any length, so `DB_PASSWORD`, `password[0]`, a quoted name, and a long dotted field name
+  all match) and its `=` or `:`, **the rest of the line** is replaced. The same screen
   runs over the whole report, not only the log lines, because the report also echoes settings values and
   paths. Neither the value's syntax nor the name's shape or length is modelled: a screen that parses
   either is bypassed by the next syntax (a scheme and a credential, an escaped quote, a comma inside the

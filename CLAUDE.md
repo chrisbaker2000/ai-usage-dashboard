@@ -222,8 +222,9 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   runs 224 combinations of launchd outcome, property-list state, shell settings, health result, and
   holder; re-introducing either rule's bug fails it on exactly its own cases. Log lines are screened
   before they are printed (`doctor.screen_for_sharing`) because the output is meant to be pasted publicly.
-  The names are `authorization`, `api_key`, `secret`, `password`, `passwd`, `token`, `cookie`,
-  `credential`, `private_key`; `scheme://user:password@` userinfo is replaced too
+  The names are `authorization`, `secret`, `token`, `cookie`, `credential`, `pass` + `word`/`wd`/`phrase`,
+  and `api`/`access`/`private` + `key`, each with an optional underscore, hyphen, or space between its
+  words (`API Key` was missed once); `scheme://user:password@` userinfo is replaced too
   (`doctor._URL_CREDENTIALS`). There is no exemption for a remainder that looks like an exception type:
   one was tried (a case-sensitive lookahead for a bare `...Error`) and a review showed `password:
 ValidError` passing it, because a type name cannot be told from a value by its shape. Its cost is that

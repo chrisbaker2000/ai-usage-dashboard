@@ -191,7 +191,7 @@ _BEARER_VALUE = re.compile(r"(?i)\bbearer[ \t]+\S+")
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"""(?ix)
     (
-        (?:authorization|api[_-]?key|secret|password|passwd|token|cookie|credential|private[_-]?key)
+        (?:authorization|(?:api|access|private)[ _-]?key|secret|pass[ _-]?(?:word|wd|phrase)|token|cookie|credential)
                                                                # a credential name, inside any longer name
         [^=:\n]*                                               # what sits before the separator, however long
         [=:]                                                   # the separator
@@ -223,10 +223,11 @@ def _screen_line(line: str) -> str:
     The server and the launchd capture hold no credentials by design, but a crash before logging starts can put
     anything Python printed into the capture. This is a net, not a promise: it removes email addresses, a value
     after ``Bearer``, the user and password in ``scheme://user:password@host``, any run of 32 or more token
-    characters, and, after a name that holds ``authorization``, ``api_key``, ``secret``, ``password``,
-    ``passwd``, ``token``, ``cookie``, ``credential``, or ``private_key`` and anything but a separator (a
-    prefix such as ``DB_``, a quote, ``[0]``, ``.value``, a dotted path of any length) and then ``=`` or ``:``,
-    the rest of the line.
+    characters, and, after a name that holds ``authorization``, ``secret``, ``token``, ``cookie``,
+    ``credential``, ``password`` (also ``passwd``, ``pass word``, ``passphrase``), or a key (``api``,
+    ``access``, or ``private``, joined to ``key`` by an underscore, a hyphen, a space, or nothing) and
+    anything but a separator (a prefix such as ``DB_``, a quote, ``[0]``, ``.value``, a dotted path of any
+    length) and then ``=`` or ``:``, the rest of the line.
 
     The rest of the line goes whatever it looks like, and the name's own shape and length are not modelled
     either. A screen that models the value's or the name's syntax is bypassed by the next syntax (a scheme and
