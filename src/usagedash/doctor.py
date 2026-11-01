@@ -507,6 +507,31 @@ def vendor_findings(settings: Settings, agent_path: str) -> list[Finding]:
     ]
 
 
+def agent_helper_findings(settings: Settings, agent_path: str) -> list[Finding]:
+    """Say whether the installed agent's collector can prepare the helper its command line tools need.
+
+    ``path_findings`` asks what a fresh ``agent install`` from this shell would do. The agent that is installed
+    uses its own recorded PATH and its own data directory, and may differ from this shell in both, so this makes
+    the call its collector makes (``executables.execution_environment`` with the data directory as the helper
+    directory, as ``rpc.JsonLineProcess`` does) in the mode that creates nothing.
+    """
+    try:
+        with _logging_silenced():
+            execution_environment(
+                {"PATH": agent_path}, Path.cwd(), helper_directory=settings.data_dir, change_nothing=True
+            )
+    except ConfigError as error:
+        return [
+            Finding(
+                Level.WARN,
+                f"The installed agent cannot prepare a helper its command line tools need: {error}",
+                ("The collector refuses to start a tool with this error, so its accounts show no data.",),
+                "Fix what that names, then run `usagedash agent install`.",
+            )
+        ]
+    return []
+
+
 def _vendor_finding(name: str, executable: str, agent_path: str, working_directory: Path) -> Finding:
     """Resolve one CLI as ``rpc.JsonLineProcess`` does: screen the PATH, then ``executables.checked_command``.
 
@@ -1005,7 +1030,8 @@ def diagnose(paths: AgentPaths, *, shell: SettingsOutcome, served: SettingsOutco
     in launchd. When the installed settings cannot be read, or an agent is loaded without a property list to
     read them from, the port, data directory, and CLIs are not checked: checking this shell's would report on
     a different installation while the agent already started may still be running.
-    The PATH check stays with ``shell``: it asks what ``agent install`` would do if run from here.
+    The PATH check stays with ``shell``: it asks what ``agent install`` would do if run from here. The helper
+    the installed agent's collector prepares is asked of ``served`` and its own recorded PATH.
     """
     findings = [
         *_guarded("system", system_findings),
@@ -1025,6 +1051,8 @@ def diagnose(paths: AgentPaths, *, shell: SettingsOutcome, served: SettingsOutco
         findings.extend(
             _guarded("command line tool", lambda: vendor_findings(effective, _agent_path(view.environment)))
         )
+    if isinstance(served, Settings):
+        findings.extend(_guarded("helper", lambda: agent_helper_findings(served, _agent_path(view.environment))))
     if isinstance(shell, Settings):
         findings.extend(_guarded("PATH", lambda: path_findings(shell)))
     findings.extend(view.findings)

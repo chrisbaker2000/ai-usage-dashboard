@@ -9,6 +9,7 @@ import os
 import re
 import socket
 import stat
+import sys
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
@@ -573,6 +574,7 @@ def machine(monkeypatch: pytest.MonkeyPatch) -> Machine:
     monkeypatch.setattr(doctor, "probe_health", probe)
     monkeypatch.setattr(doctor, "port_holder", lambda _port: fake.holder)
     monkeypatch.setattr(agent, "helper_problems", lambda _executables, _directory, _shell_path=None: [])
+    monkeypatch.setattr(executables, "REQUIRED_PATH_HELPERS", ())
     return fake
 
 
@@ -2136,6 +2138,7 @@ class TestTheFullDiagnosis:
             ("data_directory_findings", "data directory"),
             ("vendor_findings", "command line tool"),
             ("path_findings", "PATH"),
+            ("agent_helper_findings", "helper"),
             ("_answer_findings", "port"),
         ],
     )
@@ -2897,6 +2900,135 @@ class TestReadingALog:
         output = capsys.readouterr().out
         assert "owner@example.com" not in output
         assert "port must be an integer, got '<email>'" in output
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the required helper is prepared on macOS only")
+class TestTheInstalledAgentsHelper:
+    """What the installed agent's collector will meet preparing `security`, asked with its own call and settings."""
+
+    @pytest.fixture(autouse=True)
+    def helper(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        helper = executable_file(tmp_path / "usr-bin" / "security")
+        monkeypatch.setattr(executables, "REQUIRED_PATH_HELPERS", (helper,))
+        return helper
+
+    @staticmethod
+    def served_in(tmp_path: Path, name: str = "served-data") -> Settings:
+        return load_settings({"USAGEDASH_DATA_DIR": str(tmp_path / name), "USAGEDASH_PORT": str(PORT)}, home=tmp_path)
+
+    @staticmethod
+    def path_without_the_helper(tmp_path: Path) -> str:
+        directory = tmp_path / "path"
+        directory.mkdir(mode=0o700)
+        return str(directory)
+
+    def test_a_helper_that_can_be_prepared_is_no_finding_and_nothing_is_created(self, tmp_path: Path) -> None:
+        served = self.served_in(tmp_path)
+
+        findings = doctor.agent_helper_findings(served, self.path_without_the_helper(tmp_path))
+
+        assert findings == []
+        assert not served.data_dir.exists()
+
+    def test_the_environment_the_collector_builds_is_judged_without_being_changed(self, tmp_path: Path) -> None:
+        data = tmp_path / "served-data"
+
+        environment = executables.execution_environment(
+            {"PATH": self.path_without_the_helper(tmp_path)},
+            Path.cwd(),
+            helper_directory=data,
+            change_nothing=True,
+        )
+
+        assert environment["PATH"].endswith(str(data.resolve() / "agent-bin"))
+        assert not data.exists()
+
+    def test_an_unsafe_entry_in_the_installed_agents_own_folder_is_a_warning_naming_it(
+        self, tmp_path: Path, helper: Path
+    ) -> None:
+        served = self.served_in(tmp_path)
+        folder = served.data_dir / "agent-bin"
+        folder.mkdir(parents=True, mode=0o700)
+        (folder / "security").symlink_to(helper.resolve())
+        sibling = executable_file(folder / "loose", mode=0o777)
+
+        [finding] = doctor.agent_helper_findings(served, self.path_without_the_helper(tmp_path))
+
+        assert finding.level is Level.WARN
+        assert finding.title.startswith("The installed agent cannot prepare a helper its command line tools need: ")
+        assert str(sibling) in finding.title
+        assert finding.details == (
+            "The collector refuses to start a tool with this error, so its accounts show no data.",
+        )
+        assert finding.fix == "Fix what that names, then run `usagedash agent install`."
+
+    def test_a_link_that_names_another_target_is_a_warning(self, tmp_path: Path) -> None:
+        served = self.served_in(tmp_path)
+        folder = served.data_dir / "agent-bin"
+        folder.mkdir(parents=True, mode=0o700)
+        (folder / "security").symlink_to(tmp_path / "somewhere-else")
+
+        [finding] = doctor.agent_helper_findings(served, self.path_without_the_helper(tmp_path))
+
+        assert finding.title.endswith("it names an unexpected target")
+
+    def test_a_helper_already_on_the_recorded_path_needs_no_folder_and_so_no_finding(
+        self, tmp_path: Path, helper: Path
+    ) -> None:
+        served = self.served_in(tmp_path)
+        folder = served.data_dir / "agent-bin"
+        folder.mkdir(parents=True, mode=0o700)
+        executable_file(folder / "loose", mode=0o777)
+
+        assert doctor.agent_helper_findings(served, str(helper.parent)) == []
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can write to a folder with no write bit")
+    def test_a_folder_the_installed_agent_cannot_write_a_link_into_is_a_warning(self, tmp_path: Path) -> None:
+        served = self.served_in(tmp_path)
+        folder = served.data_dir / "agent-bin"
+        folder.mkdir(parents=True, mode=0o700)
+        folder.chmod(0o500)
+        try:
+            [finding] = doctor.agent_helper_findings(served, self.path_without_the_helper(tmp_path))
+        finally:
+            folder.chmod(0o700)
+
+        assert finding.title.endswith(f"cannot prepare required helpers in {folder.resolve()}: PermissionError")
+
+    def test_the_installed_agents_data_directory_and_path_are_asked_not_this_shells(
+        self,
+        tmp_path: Path,
+        paths: agent.AgentPaths,
+        machine: Machine,
+        helper: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(executables, "REQUIRED_PATH_HELPERS", (helper,))
+        served = self.served_in(tmp_path, "served-data")
+        shell = self.served_in(tmp_path, "shell-data")
+        folder = served.data_dir / "agent-bin"
+        folder.mkdir(parents=True, mode=0o700)
+        executable_file(folder / "loose", mode=0o777)
+        machine.environment = {"PATH": self.path_without_the_helper(tmp_path)}
+
+        findings = doctor.diagnose(paths, shell=shell, served=served)
+
+        [finding] = [found for found in findings if "cannot prepare a helper" in found.title]
+        assert str(served.data_dir) in finding.title
+        assert str(shell.data_dir) not in finding.title
+
+    def test_nothing_is_asked_when_no_agent_is_installed(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def forbidden(*_arguments: object, **_keywords: object) -> list[Finding]:
+            raise AssertionError("the installed agent's helper must not be asked when nothing is installed")
+
+        machine.nothing_installed()
+        monkeypatch.setattr(doctor, "agent_helper_findings", forbidden)
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
+
+        assert not [title for title in titles(findings) if "helper" in title]
 
 
 class TestAnUnexpectedErrorNeverEndsTheReport:

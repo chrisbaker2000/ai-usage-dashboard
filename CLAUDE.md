@@ -255,7 +255,11 @@ ValidError` passing it, because a type name cannot be told from a value by its s
   `doctor._vendor_finding` likewise runs `execution_environment` (the PATH screen) and then
   `checked_command`, as `rpc.JsonLineProcess` does, so a PATH directory the collector discards does not
   supply a CLI in the report either. `test_install_refuses_exactly_what_the_check_reports` runs both modes
-  on each scenario and fails if their messages differ. The whole rendered
+  on each scenario and fails if their messages differ. That check is about a fresh install from this
+  shell. The installed agent prepares its own helper from its own recorded PATH and its own data directory,
+  and may differ from this shell in both, so `doctor.agent_helper_findings` asks the call its collector
+  makes: `execution_environment` with the served data directory as `helper_directory`, in the same
+  `change_nothing` mode (macOS only, where helpers are prepared). The whole rendered
   report is screened, not only the log lines it quotes, because it also echoes settings values and paths.
   Every finding field is also made one printable line when the report is formatted (`doctor._single_line`):
   a path or message this package did not write can carry a newline, which would add a line of the report

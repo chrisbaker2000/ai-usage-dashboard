@@ -331,10 +331,12 @@ def execution_environment(
     cwd: Path,
     *,
     helper_directory: Path | None = None,
+    change_nothing: bool = False,
 ) -> dict[str, str]:
     """Copy env with canonical checked PATH; inspect all regular files/links, omitting unsafe or colon paths.
     Resolve relative entries from child cwd; use a non-directory sentinel when empty. Optional required
-    helpers live only in private dashboard data.
+    helpers live only in private dashboard data. ``change_nothing`` runs the same checks on them and creates
+    nothing (see ``with_required_helpers``): ``usagedash doctor`` asks the call the collector makes, this way.
 
     Raises:
         ConfigError: if required helpers cannot be prepared safely.
@@ -353,5 +355,7 @@ def execution_environment(
             admitted.append(str(canonical))
     search_path = os.pathsep.join(admitted)
     if helper_directory is not None and sys.platform == "darwin":
-        search_path = with_required_helpers(search_path, helper_directory, REQUIRED_PATH_HELPERS)
+        search_path = with_required_helpers(
+            search_path, helper_directory, REQUIRED_PATH_HELPERS, change_nothing=change_nothing
+        )
     return {**base, "PATH": search_path or os.devnull}
