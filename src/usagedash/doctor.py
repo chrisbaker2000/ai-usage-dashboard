@@ -13,6 +13,8 @@ import contextlib
 import logging
 import os
 import re
+import shlex
+import shutil
 import socket
 import stat
 import subprocess
@@ -29,7 +31,7 @@ from usagedash.agent import AgentPaths, AgentStatus, ServiceState
 from usagedash.api import HEALTH_PATH
 from usagedash.config import LOOPBACK_HOST, MAX_PORT, MIN_PORT, PORT_ENV, Settings
 from usagedash.errors import ConfigError, UsageDashError
-from usagedash.executables import checked_command, checked_executable, execution_environment
+from usagedash.executables import checked_command, checked_executable, execution_environment, screened_path
 from usagedash.private import (
     ensure_no_ancestor_lets_another_account_replace,
     what_lets_another_account_change,
@@ -507,6 +509,18 @@ def vendor_findings(settings: Settings, agent_path: str) -> list[Finding]:
     ]
 
 
+def _make_executable_fix(name: str, resolved: Path) -> str:
+    """The command that makes a CLI file executable, only for a file this account owns, and quoted for a shell.
+
+    A path in ``Application Support`` holds a space and would split into several arguments unquoted. A file this
+    account does not own cannot be changed by it at all (a root-owned one in a trusted folder is accepted by the
+    resolver), so for that one the remedy is to install the tool again.
+    """
+    if os.stat(resolved).st_uid != os.geteuid():
+        return f"This account does not own it, so install {name} again, then run `usagedash agent install`."
+    return f"Run `chmod u+x {shlex.quote(str(resolved))}`, then `usagedash agent install`."
+
+
 def agent_helper_findings(settings: Settings, agent_path: str) -> list[Finding]:
     """Say whether the installed agent's collector can prepare the helper its command line tools need.
 
@@ -582,7 +596,7 @@ def _vendor_finding(name: str, executable: str, agent_path: str, working_directo
         return Finding(
             Level.WARN,
             f"{name}: {resolved} is not executable",
-            fix=f"Run `chmod u+x {resolved}`, then `usagedash agent install`.",
+            fix=_make_executable_fix(name, resolved),
         )
     if pinned_file_is_gone:
         return Finding(
@@ -615,17 +629,49 @@ def path_findings(settings: Settings) -> list[Finding]:
         )
         for problem in helper_problems
     ]
-    findings += [
+    findings += _omission_findings(
+        omissions,
+        vendor_title="The directory of a vendor CLI would be left off the agent's PATH",
+        others_title=lambda count: f"{_directories(count)} would be left off the agent's PATH",
+        others_note="Missing, or another account could change them. The install warning about them is not an error.",
+        vendor_fix="Make that directory and what is in it writable by you alone, or move the CLI to one that is, "
+        "then run `usagedash agent install`.",
+    )
+    return findings
+
+
+def _directories(count: int) -> str:
+    return f"{count} PATH director{'y' if count == 1 else 'ies'}"
+
+
+def _discarded_title(count: int) -> str:
+    noun, verb = ("directory", "is") if count == 1 else ("directories", "are")
+    return f"{count} {noun} of the installed agent's PATH {verb} discarded by its collector"
+
+
+def _omission_findings(
+    omissions: Sequence[agent.PathOmission],
+    *,
+    vendor_title: str,
+    others_title: Callable[[int], str],
+    others_note: str,
+    vendor_fix: str,
+) -> list[Finding]:
+    """Turn PATH omissions into findings: a warning for a directory that holds a vendor CLI, one note for the rest.
+
+    One builder serves both questions doctor asks of a PATH (what a fresh install would leave off, and what the
+    installed agent's collector discards), so what they say and what they tell the user to do cannot drift.
+    """
+    findings = [
         Finding(
             Level.WARN,
-            f"The directory of a vendor CLI would be left off the agent's PATH: {omission.directory}",
+            f"{vendor_title}: {omission.directory}",
             (
                 omission.reason,
                 "The CLI starts from its recorded path, but anything it starts by name from that directory (a "
                 "Node-based CLI looks for `node`) will not be found.",
             ),
-            "Make that directory and what is in it writable by you alone, or move the CLI to one that is, "
-            "then run `usagedash agent install`.",
+            vendor_fix,
         )
         for omission in omissions
         if omission.holds_vendor_cli
@@ -635,17 +681,35 @@ def path_findings(settings: Settings) -> list[Finding]:
         listed = tuple(f"{omission.directory}: {omission.reason}" for omission in others[:MAX_LISTED_OMISSIONS])
         hidden = len(others) - len(listed)
         details = listed if hidden == 0 else (*listed, f"... and {hidden} more")
-        findings.append(
-            Finding(
-                Level.INFO,
-                f"{len(others)} PATH director{'y' if len(others) == 1 else 'ies'} would be left off the agent's PATH",
-                (
-                    "Missing, or another account could change them. The install warning about them is not an error.",
-                    *details,
-                ),
-            )
-        )
+        findings.append(Finding(Level.INFO, others_title(len(others)), (others_note, *details)))
     return findings
+
+
+def agent_path_findings(settings: Settings, agent_path: str) -> list[Finding]:
+    """Say which directories of the installed agent's recorded PATH its collector discards.
+
+    ``path_findings`` asks what a fresh install from this shell would leave off. The installed agent keeps the
+    PATH it recorded, and its collector screens that PATH afresh each time it starts a tool
+    (``executables.screened_path``), so a directory that has since gained an entry another account could change
+    is discarded there. The shell's own check does not see it, and a CLI still found by its recorded path does not
+    show it; the tools that CLI starts by name are what go missing.
+    """
+    _, omitted = screened_path(agent_path, Path.cwd())
+    binaries = settings.binaries
+    found = (shutil.which(command, path=agent_path) for command in (binaries.claude, binaries.codex, binaries.grok))
+    holding = {str(Path(path).absolute().parent) for path in found if path is not None}
+    omissions = [
+        agent.PathOmission(str(directory), str(error), str(directory) in holding) for directory, error in omitted
+    ]
+    return _omission_findings(
+        omissions,
+        vendor_title="The directory of a vendor CLI is discarded from the installed agent's PATH",
+        others_title=_discarded_title,
+        others_note="Missing, or another account could change them. "
+        "The collector skips them each time it starts a tool.",
+        vendor_fix="Make that directory and what is in it writable by you alone, then run `usagedash agent install`, "
+        "which records the PATH again.",
+    )
 
 
 def _port_is_free(port: int) -> bool:
@@ -1064,6 +1128,7 @@ def diagnose(paths: AgentPaths, *, shell: SettingsOutcome, served: SettingsOutco
         )
     if isinstance(served, Settings):
         findings.extend(_guarded("helper", lambda: agent_helper_findings(served, _agent_path(view.environment))))
+        findings.extend(_guarded("installed PATH", lambda: agent_path_findings(served, _agent_path(view.environment))))
     if isinstance(shell, Settings):
         findings.extend(_guarded("PATH", lambda: path_findings(shell)))
     findings.extend(view.findings)

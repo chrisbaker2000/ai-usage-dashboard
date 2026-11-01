@@ -259,7 +259,13 @@ ValidError` passing it, because a type name cannot be told from a value by its s
   shell. The installed agent prepares its own helper from its own recorded PATH and its own data directory,
   and may differ from this shell in both, so `doctor.agent_helper_findings` asks the call its collector
   makes: `execution_environment` with the served data directory as `helper_directory`, in the same
-  `change_nothing` mode (macOS only, where helpers are prepared). The whole rendered
+  `change_nothing` mode (macOS only, where helpers are prepared). The PATH the collector screens
+  (`executables.screened_path`, which `execution_environment` applies to every child) is asked the same way:
+  `doctor.agent_path_findings` lists what it discards from the installed agent's recorded PATH, with one
+  builder (`doctor._omission_findings`) shared with the shell's own PATH check, because a pinned CLI still
+  found by its recorded path says nothing about the tools it starts by name from a discarded directory. The
+  `chmod` remedy for a CLI without the execute bit is quoted for a shell and offered only for a file this
+  account owns (`doctor._make_executable_fix`). The whole rendered
   report is screened, not only the log lines it quotes, because it also echoes settings values and paths.
   Every finding field is also made one printable line when the report is formatted (`doctor._single_line`):
   a path or message this package did not write can carry a newline, which would add a line of the report

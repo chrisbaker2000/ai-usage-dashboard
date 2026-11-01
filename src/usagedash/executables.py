@@ -326,6 +326,31 @@ def _leave_out_of_child_path(directory: Path, error: ConfigError) -> None:
     logging.getLogger(__name__).warning("left out of the child PATH: %s: %s", directory, error)
 
 
+def screened_path(path: str, cwd: Path) -> tuple[list[str], list[tuple[Path, ConfigError]]]:
+    """Split ``path`` into the directories a child may search and the ones left out, each with its reason.
+
+    The admitted ones are canonical and deduplicated, in order. A relative or empty entry is read from ``cwd``.
+    A directory is left out when another account could change anything in it, when it cannot be examined, or
+    when its canonical path holds the PATH separator. This is the one screen: ``execution_environment`` applies
+    it to every child, and ``usagedash doctor`` asks it of the installed agent's recorded PATH to say what the
+    collector discards.
+    """
+    admitted: list[str] = []
+    omitted: list[tuple[Path, ConfigError]] = []
+    for part in path.split(os.pathsep):
+        directory = cwd / part
+        try:
+            canonical = canonical_directory(directory)
+            if os.pathsep in str(canonical):
+                raise ConfigError("its canonical path holds the PATH separator")
+        except ConfigError as error:
+            omitted.append((directory, error))
+            continue
+        if str(canonical) not in admitted:
+            admitted.append(str(canonical))
+    return admitted, omitted
+
+
 def execution_environment(
     base: Mapping[str, str],
     cwd: Path,
@@ -341,18 +366,9 @@ def execution_environment(
     Raises:
         ConfigError: if required helpers cannot be prepared safely.
     """
-    admitted: list[str] = []
-    for part in base.get("PATH", os.defpath).split(os.pathsep):
-        directory = cwd / part
-        try:
-            canonical = canonical_directory(directory)
-            if os.pathsep in str(canonical):
-                raise ConfigError("its canonical path holds the PATH separator")
-        except ConfigError as error:
-            _leave_out_of_child_path(directory, error)
-            continue
-        if str(canonical) not in admitted:
-            admitted.append(str(canonical))
+    admitted, omitted = screened_path(base.get("PATH", os.defpath), cwd)
+    for directory, error in omitted:
+        _leave_out_of_child_path(directory, error)
     search_path = os.pathsep.join(admitted)
     if helper_directory is not None and sys.platform == "darwin":
         search_path = with_required_helpers(

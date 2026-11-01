@@ -7,6 +7,7 @@ holder are faked, and the health probe runs against sockets opened inside the te
 import logging
 import os
 import re
+import shlex
 import socket
 import stat
 import sys
@@ -2247,6 +2248,7 @@ class TestTheFullDiagnosis:
             ("vendor_findings", "command line tool"),
             ("path_findings", "PATH"),
             ("agent_helper_findings", "helper"),
+            ("agent_path_findings", "installed PATH"),
             ("_answer_findings", "port"),
         ],
     )
@@ -2373,6 +2375,37 @@ class TestTheFullDiagnosis:
         assert finding.level is Level.WARN
         assert finding.title == f"claude: {plain.resolve()} is not executable"
         assert finding.fix == f"Run `chmod u+x {plain.resolve()}`, then `usagedash agent install`."
+
+    @pytest.mark.parametrize("folder", ["Application Support", "it's here", "a;b", "tab\there", "$HOME"])
+    def test_the_chmod_remedy_quotes_a_path_so_a_shell_reads_it_as_one_argument(
+        self, tmp_path: Path, folder: str
+    ) -> None:
+        plain = executable_file(tmp_path / folder / "claude", 0o644)
+        settings = replace(settings_for(tmp_path), binaries=Binaries(str(plain), "codex", "grok"))
+
+        [finding] = [found for found in doctor.vendor_findings(settings, "") if found.title.startswith("claude: ")]
+
+        assert finding.fix is not None
+        command = finding.fix.removeprefix("Run `").split("`, then")[0]
+        assert shlex.split(command) == ["chmod", "u+x", str(plain.resolve())]
+
+    def test_the_chmod_remedy_is_not_offered_for_a_file_this_account_does_not_own(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plain = executable_file(tmp_path / "claude", 0o644)
+        monkeypatch.setattr(doctor.os, "geteuid", lambda: os.stat(plain).st_uid + 1)
+
+        fix = doctor._make_executable_fix("claude", plain)
+
+        assert fix == "This account does not own it, so install claude again, then run `usagedash agent install`."
+        assert "chmod" not in fix
+
+    def test_the_chmod_remedy_is_offered_for_a_file_this_account_owns(self, tmp_path: Path) -> None:
+        plain = executable_file(tmp_path / "claude", 0o644)
+
+        assert doctor._make_executable_fix("claude", plain) == (
+            f"Run `chmod u+x {plain}`, then `usagedash agent install`."
+        )
 
     def test_a_vendor_cli_that_is_not_installed_is_information_not_a_problem(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
@@ -3137,6 +3170,116 @@ class TestTheInstalledAgentsHelper:
         findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
 
         assert not [title for title in titles(findings) if "helper" in title]
+
+
+class TestTheInstalledAgentsPath:
+    """What the installed agent's collector discards from the PATH it recorded, which a fresh install would not."""
+
+    @staticmethod
+    def unsafe_directory(root: Path, name: str, *, holding: str | None = None) -> Path:
+        directory = root / name
+        if holding is not None:
+            executable_file(directory / holding)
+        executable_file(directory / "loose", mode=0o777)
+        return directory
+
+    def test_a_recorded_path_every_directory_of_which_passes_is_no_finding(self, tmp_path: Path) -> None:
+        safe = tmp_path / "safe"
+        executable_file(safe / "claude")
+
+        assert doctor.agent_path_findings(settings_for(tmp_path), str(safe)) == []
+
+    def test_a_directory_holding_a_vendor_cli_that_the_collector_discards_is_a_warning_that_names_why(
+        self, tmp_path: Path
+    ) -> None:
+        directory = self.unsafe_directory(tmp_path, "bin", holding="claude")
+
+        [finding] = doctor.agent_path_findings(settings_for(tmp_path), str(directory))
+
+        assert finding.level is Level.WARN
+        assert (
+            finding.title == f"The directory of a vendor CLI is discarded from the installed agent's PATH: {directory}"
+        )
+        assert "executable entry" in finding.details[0]
+        assert str(directory / "loose") in finding.details[0]
+        assert finding.fix == (
+            "Make that directory and what is in it writable by you alone, then run `usagedash agent install`, "
+            "which records the PATH again."
+        )
+
+    def test_a_directory_that_is_not_on_the_recorded_path_is_not_asked_about_even_when_a_pinned_cli_lives_there(
+        self, tmp_path: Path
+    ) -> None:
+        directory = self.unsafe_directory(tmp_path, "bin", holding="claude")
+        settings = replace(settings_for(tmp_path), binaries=Binaries(str(directory / "claude"), "codex", "grok"))
+
+        [finding] = doctor.agent_path_findings(settings, str(tmp_path / "elsewhere"))
+
+        assert finding.level is Level.INFO
+        assert str(directory) not in " ".join((finding.title, *finding.details))
+
+    def test_a_pinned_cli_in_a_discarded_directory_is_named_even_though_its_recorded_path_still_finds_it(
+        self, tmp_path: Path
+    ) -> None:
+        directory = self.unsafe_directory(tmp_path, "bin", holding="claude")
+        settings = replace(settings_for(tmp_path), binaries=Binaries(str(directory / "claude"), "codex", "grok"))
+
+        findings = doctor.agent_path_findings(settings, str(directory))
+
+        assert titles(findings, Level.WARN) == [
+            f"The directory of a vendor CLI is discarded from the installed agent's PATH: {directory}"
+        ]
+
+    @pytest.mark.parametrize(
+        ("count", "title"),
+        [
+            (1, "1 directory of the installed agent's PATH is discarded by its collector"),
+            (2, "2 directories of the installed agent's PATH are discarded by its collector"),
+        ],
+    )
+    def test_directories_that_hold_no_vendor_cli_are_one_note_with_the_right_grammar(
+        self, tmp_path: Path, count: int, title: str
+    ) -> None:
+        directories = [self.unsafe_directory(tmp_path, f"other{number}") for number in range(count)]
+
+        [finding] = doctor.agent_path_findings(settings_for(tmp_path), os.pathsep.join(map(str, directories)))
+
+        assert finding.level is Level.INFO
+        assert finding.title == title
+        assert finding.details[0] == (
+            "Missing, or another account could change them. The collector skips them each time it starts a tool."
+        )
+        assert len(finding.details) == 1 + count
+
+    def test_a_directory_that_does_not_exist_is_discarded_and_listed_with_its_reason(self, tmp_path: Path) -> None:
+        missing = tmp_path / "missing"
+
+        [finding] = doctor.agent_path_findings(settings_for(tmp_path), str(missing))
+
+        assert finding.title == "1 directory of the installed agent's PATH is discarded by its collector"
+        assert f"{missing}: " in finding.details[1]
+
+    def test_more_directories_than_the_listing_shows_end_with_how_many_more(self, tmp_path: Path) -> None:
+        count = doctor.MAX_LISTED_OMISSIONS + 3
+        path = os.pathsep.join(str(tmp_path / f"missing{number}") for number in range(count))
+
+        [finding] = doctor.agent_path_findings(settings_for(tmp_path), path)
+
+        assert finding.details[-1] == "... and 3 more"
+        assert len(finding.details) == 1 + doctor.MAX_LISTED_OMISSIONS + 1
+
+    def test_the_diagnosis_asks_it_of_the_installed_agent_and_not_when_nothing_is_installed(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        directory = self.unsafe_directory(tmp_path, "bin", holding="claude")
+        machine.environment = {"PATH": str(directory)}
+
+        installed = doctor.diagnose(paths, shell=settings_for(tmp_path), served=settings_for(tmp_path))
+        machine.nothing_installed()
+        fresh = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
+
+        assert any("is discarded from the installed agent's PATH" in title for title in titles(installed))
+        assert not [title for title in titles(fresh) if "installed agent's PATH" in title]
 
 
 class TestAnUnexpectedErrorNeverEndsTheReport:
