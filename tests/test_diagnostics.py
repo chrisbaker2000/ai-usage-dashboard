@@ -631,7 +631,7 @@ class TestWhetherTheDashboardAnswers:
         self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("USAGEDASH_PORT", str(PORT))
-        machine.health = HealthResult(HealthKind.ANSWERED, 404)
+        machine.health, machine.holder = HealthResult(HealthKind.ANSWERED, 404), PortHolder(77, "workerd")
 
         finding = only(doctor.diagnose_agent(paths, PORT), "Something other than the dashboard")
 
@@ -640,10 +640,26 @@ class TestWhetherTheDashboardAnswers:
             f"file, so change it to {PORT + 1} (free now), then run `usagedash agent install` and `usagedash open`."
         )
 
+    @pytest.mark.parametrize("value", [None, ""], ids=["unset", "empty"])
+    def test_the_remedy_names_the_config_file_when_the_variable_is_unset_or_empty_because_both_mean_unset(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch, value: str | None
+    ) -> None:
+        if value is None:
+            monkeypatch.delenv("USAGEDASH_PORT", raising=False)
+        else:
+            monkeypatch.setenv("USAGEDASH_PORT", value)
+        machine.health, machine.holder = HealthResult(HealthKind.ANSWERED, 404), PortHolder(77, "workerd")
+
+        finding = only(doctor.diagnose_agent(paths, PORT), "Something other than the dashboard")
+
+        assert finding.fix is not None
+        assert "set `port` in the config file to" in finding.fix
+        assert "USAGEDASH_PORT" not in finding.fix
+
     def test_the_remedy_at_the_highest_port_is_a_port_the_settings_accept(
         self, paths: agent.AgentPaths, machine: Machine
     ) -> None:
-        machine.health = HealthResult(HealthKind.ANSWERED, 404)
+        machine.health, machine.holder = HealthResult(HealthKind.ANSWERED, 404), PortHolder(77, "workerd")
 
         finding = only(doctor.diagnose_agent(paths, doctor.MAX_PORT), "Something other than the dashboard")
 
@@ -655,7 +671,7 @@ class TestWhetherTheDashboardAnswers:
         self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(doctor, "_port_is_free", lambda _port: False)
-        machine.health = HealthResult(HealthKind.TIMED_OUT)
+        machine.health, machine.holder = HealthResult(HealthKind.TIMED_OUT), PortHolder(77, "workerd")
 
         finding = only(doctor.diagnose_agent(paths, PORT), "did not answer")
 
@@ -735,15 +751,49 @@ class TestWhetherTheDashboardAnswers:
         assert finding.fix is not None
         assert "move the dashboard" in finding.fix
 
-    def test_a_holder_that_could_not_be_seen_is_not_assumed_to_be_the_agent(
+    @pytest.mark.parametrize(
+        ("health", "title"),
+        [
+            (HealthResult(HealthKind.ANSWERED, 500), f"Port {PORT} answers HTTP 500, not the dashboard's 200"),
+            (
+                HealthResult(HealthKind.TIMED_OUT),
+                f"Port {PORT} accepted a connection but did not answer within 2 seconds",
+            ),
+            (HealthResult(HealthKind.FAILED), f"The request to port {PORT} failed before an answer"),
+        ],
+    )
+    def test_a_running_agent_and_a_holder_nobody_could_see_blames_neither_and_restarts_first(
+        self, paths: agent.AgentPaths, machine: Machine, health: HealthResult, title: str
+    ) -> None:
+        machine.health, machine.holder = health, None
+
+        failures = [finding for finding in doctor.diagnose_agent(paths, PORT) if finding.level is Level.FAIL]
+
+        assert len(failures) == 1
+        finding = failures[0]
+        assert finding.title == title
+        assert finding.details == (
+            "Doctor could not see which process holds the port, so it cannot tell the agent from another program.",
+        )
+        assert finding.fix is not None
+        assert finding.fix.startswith(
+            "Restart the agent with `usagedash agent install`, then run `usagedash doctor` again. If it fails the "
+            f"same way, another program may hold port {PORT}. Quit that program, or move the dashboard: "
+        )
+        assert finding.fix.endswith("The log lines below may say more.")
+        assert "Something other than the dashboard" not in finding.title
+
+    def test_no_agent_process_and_no_visible_holder_that_answers_badly_is_another_program(
         self, paths: agent.AgentPaths, machine: Machine
     ) -> None:
-        machine.health, machine.holder = HealthResult(HealthKind.TIMED_OUT), None
+        machine.state, machine.health, machine.holder = None, HealthResult(HealthKind.ANSWERED, 404), None
 
-        finding = only(doctor.diagnose_agent(paths, PORT), "accepted a connection")
+        finding = only(doctor.diagnose_agent(paths, PORT), "Something other than the dashboard")
 
+        assert finding.level is Level.FAIL
+        assert finding.details == ()
         assert finding.fix is not None
-        assert "move the dashboard" in finding.fix
+        assert finding.fix.startswith("Quit that program, or move the dashboard: ")
 
     def test_nothing_listening_with_no_agent_process_points_back_at_the_agent_problem(
         self, paths: agent.AgentPaths, machine: Machine
@@ -1200,7 +1250,14 @@ class TestTheFullDiagnosis:
         finding = only(doctor.diagnose(paths, shell=settings_for(tmp_path), served=None), "/opt/tools/bin")
 
         assert finding.level is Level.WARN
-        assert finding.details == ("its permissions (0775) let other accounts write",)
+        assert finding.title == "The directory of a vendor CLI would be left off the agent's PATH: /opt/tools/bin"
+        assert finding.details == (
+            "its permissions (0775) let other accounts write",
+            "The CLI starts from its recorded path, but anything it starts by name from that directory (a "
+            "Node-based CLI looks for `node`) will not be found.",
+        )
+        assert finding.fix is not None
+        assert "writable by you alone" in finding.fix
 
     @pytest.mark.parametrize(
         ("count", "noun", "hidden"), [(1, "directory", 0), (2, "directories", 0), (11, "directories", 1)]

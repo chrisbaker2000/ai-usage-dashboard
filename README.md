@@ -410,9 +410,10 @@ The usual causes, by what you see:
 - **A long warning about directories "left out of the agent's PATH".** This is normal and is not why
   anything failed. The agent runs with only the PATH directories that you alone can change, so a
   missing directory, or one another account could write to, is left off. Doctor lists them. It flags
-  only the case that matters: a directory that holds `claude`, `codex`, or `grok`, because the agent
-  then could not run that CLI. Make that directory writable by you alone, or move the CLI to one that
-  is, and run `agent install` again.
+  only the case that matters: a directory that holds `claude`, `codex`, or `grok`. The CLI still starts
+  from its recorded path, but anything it starts by name from that directory (a Node-based CLI looks
+  for `node`) will not be found. Make that directory writable by you alone, or move the CLI to one
+  that is, and run `agent install` again.
 - **`agent install` exits 1 with "is installed, but the dashboard is not answering".** The agent is
   registered with launchd and nothing is serving yet. The output says what launchd reports and shows
   the agent's last log lines. The causes are the next three items. Run `doctor` ten seconds later

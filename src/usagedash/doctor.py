@@ -402,8 +402,12 @@ def path_findings(settings: Settings) -> list[Finding]:
     findings = [
         Finding(
             Level.WARN,
-            f"The directory holding a vendor CLI would be left off the agent's PATH: {omission.directory}",
-            (omission.reason,),
+            f"The directory of a vendor CLI would be left off the agent's PATH: {omission.directory}",
+            (
+                omission.reason,
+                "The CLI starts from its recorded path, but anything it starts by name from that directory (a "
+                "Node-based CLI looks for `node`) will not be found.",
+            ),
             "Make that directory and what is in it writable by you alone, or move the CLI to one that is, "
             "then run `usagedash agent install`.",
         )
@@ -460,7 +464,7 @@ def _move_fix(port: int) -> str:
     """
     suggested = suggest_port(port)
     value = "a free port from 1024 to 65535" if suggested is None else f"{suggested} (free now)"
-    if PORT_ENV in os.environ:
+    if os.environ.get(PORT_ENV):
         setting = f"this shell sets {PORT_ENV}, which outranks the config file, so change it to {value}"
     else:
         setting = f"set `port` in the config file to {value}"
@@ -595,7 +599,28 @@ def _answer_findings(port: int, state: ServiceState | None) -> list[Finding]:
                 "Restart it with `usagedash agent install`. If this comes back, read the log lines below.",
             )
         ]
+    if holder is None and agent_pid is not None:
+        return [_unattributed_trouble(port, health)]
     return [Finding(Level.FAIL, _port_trouble_title(port, health), _holder_detail(port, holder), _move_fix(port))]
+
+
+def _unattributed_trouble(port: int, health: HealthResult) -> Finding:
+    """The agent runs and the port misbehaves, but nobody could be seen holding it, so neither can be blamed.
+
+    ``lsof`` shows only this account's processes and can fail, so no holder is not evidence of another program.
+    The agent is restarted first because that is the cheaper step and is right if the agent is at fault.
+    """
+    if health.kind is HealthKind.ANSWERED:
+        title = f"Port {port} answers HTTP {health.status}, not the dashboard's 200"
+    else:
+        title = _port_trouble_title(port, health)
+    return Finding(
+        Level.FAIL,
+        title,
+        ("Doctor could not see which process holds the port, so it cannot tell the agent from another program.",),
+        "Restart the agent with `usagedash agent install`, then run `usagedash doctor` again. If it fails the same "
+        f"way, another program may hold port {port}. {_move_fix(port)} The log lines below may say more.",
+    )
 
 
 def _served_by_someone_else(port: int, holder: PortHolder | None, why: str) -> Finding:
