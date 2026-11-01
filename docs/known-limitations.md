@@ -134,6 +134,21 @@ not running at all and something else answers.
   property-list directory beforehand: a symlinked capture log or an unsafe `~/Library/LaunchAgents` stops the
   next `agent install` and nothing that is already running. A report can therefore end "working" while a
   reinstall would be refused; the refusal is printed by the reinstall, not by `doctor`.
+- **`doctor`'s previews of what install and the collector will do are advisory, and where one differs from the
+  real step, the real step's message wins.** Two differences are known and accepted:
+  - _The helper preview judges the data directory as it is now._ `agent install` makes a data directory this
+    account owns private before it prepares the helper, so a directory that is owner-owned and currently
+    writable by another account can make the preview name a refusal that install repairs on its way. The same
+    directory is already a failure of its own in the report ("Another account can change the data directory"),
+    with the same fix, `usagedash agent install`, so the user is sent to the same command either way.
+  - _The installed-PATH check names a discarded directory as holding a vendor CLI when the first match by name
+    on the recorded PATH is in it._ The collector, having discarded that directory, may run a later copy of the
+    same CLI from a safe one, so "the tools it starts by name will not be found" may not apply. The directory is
+    still one the collector discards, and the fix it names (make it writable by you alone, then run
+    `usagedash agent install`) is correct and does no harm.
+
+  Neither preview is a gate: neither changes whether the dashboard is reported as working.
+
 - **The port holder is only what this account can see.** `doctor` asks `lsof`, which lists only this
   account's processes without administrator rights, and counts only a listener that a connection to
   `127.0.0.1` reaches. A holder it names is real; an absent holder is not proof the port is free, and it

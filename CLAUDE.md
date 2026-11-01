@@ -265,7 +265,10 @@ ValidError` passing it, because a type name cannot be told from a value by its s
   builder (`doctor._omission_findings`) shared with the shell's own PATH check, because a pinned CLI still
   found by its recorded path says nothing about the tools it starts by name from a discarded directory. The
   `chmod` remedy for a CLI without the execute bit is quoted for a shell and offered only for a file this
-  account owns (`doctor._make_executable_fix`). The whole rendered
+  account owns (`doctor._make_executable_fix`). These previews of install and of the collector are advisory
+  and never gate the "working" verdict; two known divergences (the helper preview judges the data directory
+  before install makes it private; the installed-PATH check attributes a CLI by the first match on the
+  recorded PATH) are accepted in `docs/known-limitations.md`, not missing checks. The whole rendered
   report is screened, not only the log lines it quotes, because it also echoes settings values and paths.
   Every finding field is also made one printable line when the report is formatted (`doctor._single_line`):
   a path or message this package did not write can carry a newline, which would add a line of the report
