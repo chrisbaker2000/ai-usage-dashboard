@@ -30,7 +30,7 @@ from usagedash.api import HEALTH_PATH
 from usagedash.config import LOOPBACK_HOST, MAX_PORT, MIN_PORT, PORT_ENV, Settings
 from usagedash.errors import ConfigError, UsageDashError
 from usagedash.executables import checked_command, checked_executable
-from usagedash.private import ensure_no_ancestor_lets_another_account_replace
+from usagedash.private import ensure_no_ancestor_lets_another_account_replace, what_lets_another_account_change
 
 HTTP_OK = 200
 LSOF_BINARY = "/usr/sbin/lsof"
@@ -265,8 +265,10 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
     """Check what ``agent install`` and the server require of the data directory, without creating it.
 
     The ancestors must not be replaceable by another account, and the directory itself must be a real
-    folder this account owns: ``private.ensure_private_directory`` refuses a symbolic link or a file there
-    and cannot make another account's folder private. The ancestry walk does not look at that last entry.
+    folder this account owns that no other account can change: ``private.ensure_private_directory`` refuses a
+    symbolic link or a file there and cannot make another account's folder private, and it tightens an owned
+    folder's modes and access-control list only when it runs, not before. The ancestry walk does not look at
+    that last entry, so "safe to use" is claimed only after ``what_lets_another_account_change`` finds nothing.
     """
     data_dir = settings.data_dir
     try:
@@ -279,6 +281,7 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
                 fix="Make the directory it names writable by you alone, or point USAGEDASH_DATA_DIR elsewhere.",
             )
         ]
+    cannot_examine = "Check the permissions of that folder and the ones above it, then run `usagedash doctor` again."
     try:
         status = os.lstat(data_dir)
     except FileNotFoundError:
@@ -288,7 +291,7 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
             Finding(
                 Level.FAIL,
                 f"The data directory {data_dir} cannot be examined: {type(error).__name__}",
-                fix="Check the permissions of that folder and the ones above it, then run `usagedash doctor` again.",
+                fix=cannot_examine,
             )
         ]
     in_the_way = "Move it aside or point USAGEDASH_DATA_DIR at another folder, then run `usagedash agent install`."
@@ -300,6 +303,19 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
         return [Finding(Level.FAIL, f"The data directory {data_dir} is a file, not a folder", fix=in_the_way)]
     if status.st_uid != os.geteuid():
         return [Finding(Level.FAIL, f"The data directory {data_dir} belongs to another account", fix=in_the_way)]
+    try:
+        problem = what_lets_another_account_change(data_dir)
+    except ConfigError as error:
+        return [Finding(Level.FAIL, f"The data directory cannot be examined: {error}", fix=cannot_examine)]
+    if problem is not None:
+        return [
+            Finding(
+                Level.FAIL,
+                f"Another account can change the data directory {data_dir}: {problem}",
+                ("It holds the database and the access token, so another account could replace them.",),
+                "Run `usagedash agent install`, which makes it owner-only again.",
+            )
+        ]
     return [Finding(Level.OK, f"The data directory {data_dir} is safe to use")]
 
 

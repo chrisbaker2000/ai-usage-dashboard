@@ -955,6 +955,82 @@ class TestTheFullDiagnosis:
         assert titles(findings, Level.FAIL) == [f"The data directory {data} belongs to another account"]
         assert "is safe to use" not in " ".join(titles(findings))
 
+    @pytest.mark.parametrize("mode", [0o777, 0o770, 0o707, 0o722, 0o702])
+    def test_a_data_directory_this_account_owns_but_others_can_write_is_a_failure_not_safe_to_use(
+        self, tmp_path: Path, mode: int
+    ) -> None:
+        settings = settings_for(tmp_path)
+        data = tmp_path / "data"
+        data.mkdir()
+        data.chmod(mode)
+
+        try:
+            findings = doctor.data_directory_findings(settings)
+        finally:
+            data.chmod(0o700)
+
+        failure = only(findings, "Another account can change the data directory")
+        assert failure.level is Level.FAIL
+        assert failure.title.startswith(f"Another account can change the data directory {data}: ")
+        assert failure.details == (
+            "It holds the database and the access token, so another account could replace them.",
+        )
+        assert failure.fix == "Run `usagedash agent install`, which makes it owner-only again."
+        assert "is safe to use" not in " ".join(titles(findings))
+
+    @pytest.mark.parametrize("mode", [0o700, 0o750, 0o755, 0o705, 0o500])
+    def test_a_data_directory_others_can_at_most_read_is_safe_to_use(self, tmp_path: Path, mode: int) -> None:
+        settings = settings_for(tmp_path)
+        data = tmp_path / "data"
+        data.mkdir()
+        data.chmod(mode)
+
+        try:
+            findings = doctor.data_directory_findings(settings)
+        finally:
+            data.chmod(0o700)
+
+        assert titles(findings, Level.OK) == [f"The data directory {data} is safe to use"]
+
+    def test_an_access_control_entry_that_lets_another_account_change_the_directory_is_a_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = settings_for(tmp_path)
+        (tmp_path / "data").mkdir()
+        monkeypatch.setattr(
+            doctor, "what_lets_another_account_change", lambda _path: "an access-control entry lets another write"
+        )
+
+        findings = doctor.data_directory_findings(settings)
+
+        assert titles(findings, Level.FAIL) == [
+            f"Another account can change the data directory {tmp_path / 'data'}: "
+            "an access-control entry lets another write"
+        ]
+
+    def test_a_data_directory_whose_permissions_cannot_be_read_is_a_failure_that_says_what_to_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = settings_for(tmp_path)
+        (tmp_path / "data").mkdir()
+
+        def unreadable(path: Path) -> str | None:
+            raise ConfigError(f"cannot examine {path}: PermissionError")
+
+        monkeypatch.setattr(doctor, "what_lets_another_account_change", unreadable)
+
+        findings = doctor.data_directory_findings(settings)
+
+        failure = only(findings, "cannot be examined")
+        assert (
+            failure.title
+            == f"The data directory cannot be examined: cannot examine {tmp_path / 'data'}: PermissionError"
+        )
+        assert (
+            failure.fix
+            == "Check the permissions of that folder and the ones above it, then run `usagedash doctor` again."
+        )
+
     def test_a_data_directory_this_account_owns_is_safe_to_use(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

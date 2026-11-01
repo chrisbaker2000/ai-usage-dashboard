@@ -65,7 +65,7 @@ Do each step, check its result, and stop at the first failure you cannot fix by 
 Rules:
 - Never read, print, copy, or send credentials: the contents of ~/.claude, ~/.codex, ~/.grok, the macOS keychain, the access-token file, or open-dashboard.html.
 - Do not use sudo, edit the launchd property list by hand, run launchctl yourself, or change the repository's code.
-- Do not change file permissions outside the repository folder. If a fix needs that, tell me what and why, and wait for me.
+- Do not change file permissions yourself outside the repository folder. The usagedash commands make their own files (the config file, the agent's property list, the data folder) owner-only as they read or install them; that is expected. If a fix needs any other permission change, tell me what and why, and wait for me.
 - If you need something these steps do not cover, stop and ask me.
 
 When you finish, tell me: the last line of `usagedash doctor`, the address the dashboard is on, and which of the claude, codex, and grok CLIs doctor found.
@@ -87,7 +87,7 @@ The AI usage dashboard in ~/Developer/ai-usage-dashboard is not working. Find ou
 Rules:
 - Never read, print, copy, or send credentials: the contents of ~/.claude, ~/.codex, ~/.grok, the macOS keychain, the access-token file, or open-dashboard.html.
 - Do not use sudo, edit the launchd property list by hand, run launchctl yourself, or change the repository's code.
-- Do not change file permissions outside the repository folder. If a fix needs that, tell me what and why, and wait for me.
+- Do not change file permissions yourself outside the repository folder. The usagedash commands make their own files (the config file, the agent's property list, the data folder) owner-only as they read or install them; that is expected. If a fix needs any other permission change, tell me what and why, and wait for me.
 - If a fix is not in the Troubleshooting section, stop and show me the doctor output instead of guessing.
 
 When you finish, tell me what was wrong, what you changed, and the last line of `usagedash doctor`.
