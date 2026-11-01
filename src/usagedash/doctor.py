@@ -9,13 +9,15 @@ purpose, a launchd field, a file's own last lines. An unexpected exception is re
 nothing else, like everywhere else in this package.
 """
 
+import contextlib
+import logging
 import os
 import re
 import socket
 import stat
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -27,7 +29,7 @@ from usagedash.agent import AgentPaths, ServiceState
 from usagedash.api import HEALTH_PATH
 from usagedash.config import LOOPBACK_HOST, MAX_PORT, MIN_PORT, PORT_ENV, Settings
 from usagedash.errors import ConfigError, UsageDashError
-from usagedash.executables import canonical_executable, checked_executable
+from usagedash.executables import checked_command, checked_executable
 from usagedash.private import ensure_no_ancestor_lets_another_account_replace
 
 HTTP_OK = 200
@@ -56,16 +58,30 @@ class Level(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Finding:
-    """One result: a title, optional lines under it, and the command that fixes it when there is one."""
+    """One result: a title, optional lines under it, and the next step.
+
+    Raises:
+        ValueError: if a ``FAIL`` names no next step. A report that stops the user without saying what to do
+            is the failure this command exists to end, so the type refuses to build one.
+    """
 
     level: Level
     title: str
     details: tuple[str, ...] = ()
     fix: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.level is Level.FAIL and not self.fix:
+            raise ValueError(f"a FAIL must name the next step: {self.title}")
+
 
 SettingsOutcome = Settings | UsageDashError | None
 """Settings that loaded, the error that stopped them loading, or None when there is nothing to load."""
+
+_RECOVER_THE_PROPERTY_LIST = (
+    "Run `usagedash agent uninstall`, which removes a property list it cannot trust without starting it, then "
+    "`usagedash agent install`. `agent install` alone reads the same property list and stops at the same error."
+)
 
 
 class HealthKind(StrEnum):
@@ -176,6 +192,7 @@ def system_findings() -> list[Finding]:
                 Level.FAIL,
                 f"This is {sys.platform}, not macOS",
                 ("The agent is a launchd service and Claude's working login is read from the macOS keychain.",),
+                "Run usagedash on a Mac.",
             )
         )
         return findings
@@ -202,7 +219,11 @@ def settings_findings(shell: SettingsOutcome, served: SettingsOutcome) -> list[F
             Finding(
                 Level.FAIL,
                 f"The settings cannot be loaded: {shell}",
-                fix="Correct the setting it names in the config file, or unset that USAGEDASH_* variable.",
+                fix=(
+                    "Read the message. If it names a setting, correct it in the config file or unset that "
+                    "USAGEDASH_* variable. If it says a file's permissions are unsafe, make that file writable "
+                    "by you alone (`chmod go-w <file>`). Then run `usagedash doctor` again."
+                ),
             )
         )
     elif shell is not None:
@@ -220,7 +241,7 @@ def settings_findings(shell: SettingsOutcome, served: SettingsOutcome) -> list[F
             Finding(
                 Level.FAIL,
                 f"The installed agent's settings cannot be read: {served}",
-                fix="Run `usagedash agent install` again from the repository directory.",
+                fix=_RECOVER_THE_PROPERTY_LIST,
             )
         )
     elif isinstance(shell, Settings) and served.port != shell.port:
@@ -257,7 +278,13 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
     except FileNotFoundError:
         return [Finding(Level.INFO, f"The data directory {data_dir} does not exist yet; the first start makes it")]
     except OSError as error:
-        return [Finding(Level.FAIL, f"The data directory {data_dir} cannot be examined: {type(error).__name__}")]
+        return [
+            Finding(
+                Level.FAIL,
+                f"The data directory {data_dir} cannot be examined: {type(error).__name__}",
+                fix="Check the permissions of that folder and the ones above it, then run `usagedash doctor` again.",
+            )
+        ]
     in_the_way = "Move it aside or point USAGEDASH_DATA_DIR at another folder, then run `usagedash agent install`."
     if stat.S_ISLNK(status.st_mode):
         return [
@@ -270,42 +297,56 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
     return [Finding(Level.OK, f"The data directory {data_dir} is safe to use")]
 
 
-def vendor_findings(settings: Settings) -> list[Finding]:
-    """Report where each vendor CLI is found. A missing one is information: its cards just stay empty."""
-    findings: list[Finding] = []
-    binaries = settings.binaries
-    for name, executable in (("claude", binaries.claude), ("codex", binaries.codex), ("grok", binaries.grok)):
-        if os.sep not in executable:
-            findings.append(
-                Finding(
-                    Level.INFO,
-                    f"{name}: not found on PATH",
-                    (f"Its accounts show no data until {name} is installed. Ignore this if you do not use it.",),
-                )
-            )
-        elif not os.path.lexists(executable):
-            findings.append(
-                Finding(
-                    Level.WARN,
-                    f"{name}: {executable} does not exist",
-                    fix=f"Install {name} again, or correct [binaries] in the config file, then run `agent install`.",
-                )
-            )
-        else:
-            findings.append(_checked_vendor_finding(name, Path(executable)))
-    return findings
-
-
-def _checked_vendor_finding(name: str, executable: Path) -> Finding:
-    """Apply the check the agent applies before it starts a CLI, then require what that check does not.
-
-    ``canonical_executable`` accepts a missing target and any file mode, so a dangling link or a file
-    without the execute bit would pass it and still fail when the agent starts the CLI.
-    """
+@contextlib.contextmanager
+def _logging_silenced() -> Generator[None]:
+    """Keep the log records the resolution code writes out of the report; ``doctor`` words its own findings."""
+    previous = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
     try:
-        resolved = canonical_executable(executable)
+        yield
+    finally:
+        logging.disable(previous)
+
+
+def vendor_findings(settings: Settings, agent_path: str) -> list[Finding]:
+    """Report how the agent would find each vendor CLI, by the resolution it uses when it starts one.
+
+    ``agent_path`` is the PATH the agent runs with. A missing CLI is information: its cards just stay empty.
+    """
+    binaries = settings.binaries
+    return [
+        _vendor_finding(name, executable, agent_path, settings.data_dir)
+        for name, executable in (("claude", binaries.claude), ("codex", binaries.codex), ("grok", binaries.grok))
+    ]
+
+
+def _vendor_finding(name: str, executable: str, agent_path: str, working_directory: Path) -> Finding:
+    """Resolve one CLI with ``executables.checked_command``, then require what that check does not.
+
+    That is the call the collector makes before it starts a CLI, so a bare name found on the agent's PATH and
+    a pin whose file has been removed (a Homebrew cask upgrade does that) are judged as the agent will judge
+    them, and not as a missing file. The check accepts a missing target and any file mode, so a dangling link
+    or a file without the execute bit would pass it and still fail when the CLI is started.
+    """
+    pinned_file_is_gone = os.sep in executable and not os.path.lexists(executable)
+    try:
+        with _logging_silenced():
+            command = checked_command([executable], {"PATH": agent_path}, working_directory, fallback_name=name)
+    except FileNotFoundError:
+        return Finding(
+            Level.INFO,
+            f"{name}: not found on PATH",
+            (f"Its accounts show no data until {name} is installed. Ignore this if you do not use it.",),
+        )
     except ConfigError as error:
+        if pinned_file_is_gone:
+            return Finding(
+                Level.WARN,
+                f"{name}: {error}",
+                fix=f"Install {name} again, then run `usagedash agent install`.",
+            )
         return Finding(Level.WARN, f"{name}: {error}")
+    resolved = Path(command[0])
     if not os.path.isfile(resolved):
         return Finding(
             Level.WARN,
@@ -318,6 +359,13 @@ def _checked_vendor_finding(name: str, executable: Path) -> Finding:
             Level.WARN,
             f"{name}: {resolved} is not executable",
             fix=f"Run `chmod u+x {resolved}`, then `usagedash agent install`.",
+        )
+    if pinned_file_is_gone:
+        return Finding(
+            Level.WARN,
+            f"{name}: the recorded {executable} is gone; the agent uses {resolved}",
+            ("It found that file by name on its own PATH, so it still works.",),
+            "Run `usagedash agent install` to record the current file.",
         )
     return Finding(Level.OK, f"{name}: {resolved}")
 
@@ -399,8 +447,17 @@ def _move_fix(port: int) -> str:
     )
 
 
-def _agent_findings(paths: AgentPaths) -> tuple[list[Finding], ServiceState | None]:
-    """Say whether the agent is installed, loaded, and running, and return launchd's state for later checks."""
+@dataclass(frozen=True, slots=True)
+class AgentView:
+    """What the agent checks learned: their findings, launchd's state, and the environment the plist records."""
+
+    findings: list[Finding]
+    state: ServiceState | None
+    environment: dict[str, str] | None
+
+
+def _agent_findings(paths: AgentPaths) -> AgentView:
+    """Say whether the agent is installed, loaded, and running, and keep what later checks need to know."""
     findings: list[Finding] = []
     installed: dict[str, str] | None = None
     plist_untrusted = False
@@ -408,30 +465,41 @@ def _agent_findings(paths: AgentPaths) -> tuple[list[Finding], ServiceState | No
         installed = agent.installed_environment(paths)
     except UsageDashError as error:
         plist_untrusted = True
-        findings.append(Finding(Level.FAIL, f"The installed property list cannot be trusted: {error}"))
+        findings.append(
+            Finding(
+                Level.FAIL,
+                f"The installed property list cannot be trusted: {error}",
+                fix=_RECOVER_THE_PROPERTY_LIST,
+            )
+        )
     try:
         state = agent.service_state(paths)
     except UsageDashError as error:
-        findings.append(Finding(Level.FAIL, f"launchd cannot be asked about the agent: {error}"))
-        return findings, None
+        findings.append(
+            Finding(
+                Level.FAIL,
+                f"launchd cannot be asked about the agent: {error}",
+                fix="Check that `/bin/launchctl` runs in this terminal, then run `usagedash doctor` again.",
+            )
+        )
+        return AgentView(findings, None, installed)
     install_fix = "Run `usagedash agent install` from the repository directory."
     if state is None:
         if plist_untrusted:
-            return findings, None
+            return AgentView(findings, None, installed)
         if installed is None:
-            return [Finding(Level.FAIL, "The agent is not installed", fix=install_fix)], None
-        return [
-            Finding(
-                Level.FAIL,
-                "The agent is installed but launchd has not loaded it",
-                (f"property list: {paths.plist}",),
-                install_fix,
-            )
-        ], None
+            return AgentView([Finding(Level.FAIL, "The agent is not installed", fix=install_fix)], None, None)
+        not_loaded = Finding(
+            Level.FAIL,
+            "The agent is installed but launchd has not loaded it",
+            (f"property list: {paths.plist}",),
+            install_fix,
+        )
+        return AgentView([not_loaded], None, installed)
     if installed is None and not plist_untrusted:
         findings.append(Finding(Level.WARN, "launchd lists an agent whose property list is gone", fix=install_fix))
     findings.append(_running_finding(state))
-    return findings, state
+    return AgentView(findings, state, installed)
 
 
 def _running_finding(state: ServiceState) -> Finding:
@@ -485,24 +553,14 @@ def _answer_findings(port: int, state: ServiceState | None) -> list[Finding]:
                 )
             ]
         return [Finding(Level.OK, f"The dashboard answers on port {port}")]
-    if health.kind is HealthKind.ANSWERED:
-        return [
-            Finding(
-                Level.FAIL,
-                f"Something other than the dashboard answers on port {port} (HTTP {health.status})",
-                _holder_detail(port, holder),
-                _move_fix(port),
-            )
-        ]
     if health.kind is HealthKind.REFUSED and agent_pid is not None:
         return [
             Finding(
                 Level.FAIL,
                 f"The agent is running but nothing is listening on port {port} yet",
-                (
-                    "It may still be starting: wait ten seconds and run `usagedash doctor` again.",
-                    "If it stays like this, the log lines below say why it could not start.",
-                ),
+                ("It may still be starting.",),
+                "Wait ten seconds, then run `usagedash doctor` again. If it stays like this, the log lines below "
+                "say why it could not start.",
             )
         ]
     if health.kind is HealthKind.REFUSED:
@@ -514,40 +572,60 @@ def _answer_findings(port: int, state: ServiceState | None) -> list[Finding]:
                 "Fix the agent problem above first.",
             )
         ]
-    if health.kind is HealthKind.TIMED_OUT:
+    if holder is not None and agent_pid is not None and holder.pid == agent_pid:
         return [
             Finding(
                 Level.FAIL,
-                f"Port {port} accepted a connection but did not answer within {HEALTH_TIMEOUT_SECONDS:.0f} seconds",
-                _holder_detail(port, holder),
-                _move_fix(port),
+                _agent_trouble_title(agent_pid, port, health),
+                ("No other program is in the way, so a different port will not help.",),
+                "Restart it with `usagedash agent install`. If this comes back, read the log lines below.",
             )
         ]
-    return [
-        Finding(
-            Level.FAIL,
-            f"The request to port {port} failed before an answer",
-            _holder_detail(port, holder),
-            _move_fix(port),
-        )
-    ]
+    return [Finding(Level.FAIL, _port_trouble_title(port, health), _holder_detail(port, holder), _move_fix(port))]
+
+
+def _port_trouble_title(port: int, health: HealthResult) -> str:
+    """Title for a port that answers wrongly, stalls, or fails, when the agent is not what holds it."""
+    if health.kind is HealthKind.ANSWERED:
+        return f"Something other than the dashboard answers on port {port} (HTTP {health.status})"
+    if health.kind is HealthKind.TIMED_OUT:
+        return f"Port {port} accepted a connection but did not answer within {HEALTH_TIMEOUT_SECONDS:.0f} seconds"
+    return f"The request to port {port} failed before an answer"
+
+
+def _agent_trouble_title(agent_pid: int, port: int, health: HealthResult) -> str:
+    """Title for the same three results when the agent's own process holds the port."""
+    held = f"The agent (pid {agent_pid}) holds port {port}, but"
+    if health.kind is HealthKind.ANSWERED:
+        return f"{held} its health check answers HTTP {health.status}"
+    if health.kind is HealthKind.TIMED_OUT:
+        return f"{held} it did not answer within {HEALTH_TIMEOUT_SECONDS:.0f} seconds"
+    return f"{held} the health request failed before an answer"
 
 
 def log_findings(paths: AgentPaths) -> list[Finding]:
-    """Show the last lines of the two logs the agent writes, when they hold anything."""
+    """Show the last lines of the two logs the agent writes, when they hold anything.
+
+    The server writes its records to standard error as well as to its own file, so launchd's capture of
+    standard error usually repeats them: a tail identical to the one just shown is not shown again.
+    """
     findings: list[Finding] = []
+    shown: list[str] | None = None
     for log in (paths.launchd_logs[1], paths.server_log):
         lines = tail_lines(log)
-        if lines:
-            findings.append(Finding(Level.INFO, f"Last lines of {log}", tuple(lines)))
+        if not lines or lines == shown:
+            continue
+        findings.append(Finding(Level.INFO, f"Last lines of {log}", tuple(lines)))
+        shown = lines
     return findings
 
 
 def diagnose_agent(paths: AgentPaths, port: int | None) -> list[Finding]:
     """Check the agent, whether it answers, and its logs. Used alone after an install or an open that failed."""
-    findings, state = _agent_findings(paths)
+    view = _agent_findings(paths)
+    findings = list(view.findings)
     if port is not None:
-        findings.extend(_answer_findings(port, state))
+        findings.extend(_answer_findings(port, view.state))
     findings.extend(log_findings(paths))
     return findings
 
@@ -562,19 +640,24 @@ def diagnose(paths: AgentPaths, *, shell: SettingsOutcome, served: SettingsOutco
     """
     findings = [*system_findings(), *settings_findings(shell, served)]
     effective = served if isinstance(served, Settings) else shell if isinstance(shell, Settings) else None
+    view = _agent_findings(paths)
     if effective is not None:
         findings.extend(data_directory_findings(effective))
-    if effective is not None:
-        findings.extend(vendor_findings(effective))
+        findings.extend(vendor_findings(effective, _agent_path(view.environment)))
     if isinstance(shell, Settings):
         findings.extend(path_findings(shell))
-    agent_findings, state = _agent_findings(paths)
-    findings.extend(agent_findings)
+    findings.extend(view.findings)
     if effective is not None:
-        findings.extend(_answer_findings(effective.port, state))
-    if any(finding.level in (Level.WARN, Level.FAIL) for finding in findings):
+        findings.extend(_answer_findings(effective.port, view.state))
+    if has_failure(findings):
         findings.extend(log_findings(paths))
     return findings
+
+
+def _agent_path(environment: dict[str, str] | None) -> str:
+    """The PATH the agent runs with: the one its property list records, or this shell's when none is installed."""
+    recorded = None if environment is None else environment.get("PATH")
+    return recorded if recorded is not None else os.environ.get("PATH", os.defpath)
 
 
 def has_failure(findings: Sequence[Finding]) -> bool:

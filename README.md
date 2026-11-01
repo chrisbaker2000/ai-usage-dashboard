@@ -443,6 +443,12 @@ The usual causes, by what you see:
   as `account`, `quota`, and `tokens`. "not logged in" means that CLI has no signed-in account on this
   Mac: sign in with the vendor CLI as usual, or add the account with `usagedash login`. A source that
   names a missing or unsafe executable is the CLI problem doctor lists under the vendor CLIs.
+- **Doctor says "the recorded … is gone; the agent uses …".** A CLI was upgraded or moved after the
+  agent was installed, as a Homebrew cask upgrade does. The agent still works: it finds the CLI by name
+  on its own PATH. Run `agent install` to record the current file and clear the warning.
+- **Doctor says the property list "cannot be trusted".** Another account could change it, or it is a
+  link. `agent install` stops at the same error, so run `.venv/bin/usagedash agent uninstall` first. It
+  removes that property list without starting it. Then run `agent install`.
 - **"Claude Code reported no plan limits for this login".** See [Add an account](#add-an-account).
 - **You changed a setting and nothing changed.** The running agent keeps the settings it started
   with. Run `agent install`, then `open`.

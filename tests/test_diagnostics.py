@@ -4,6 +4,7 @@ Nothing here talks to this machine's launchd or to a listener it did not start: 
 holder are faked, and the health probe runs against sockets opened inside the test.
 """
 
+import logging
 import os
 import socket
 import stat
@@ -267,6 +268,13 @@ def only(findings: list[Finding], containing: str) -> Finding:
     return matches[0]
 
 
+def executable_file(path: Path, mode: int = 0o755) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n")
+    path.chmod(mode)
+    return path
+
+
 def write_log(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
@@ -415,6 +423,36 @@ class TestTheAgentChecks:
             "The installed property list cannot be trusted: another account could change it",
             "launchd cannot be asked about the agent: launchctl print could not be run: FileNotFoundError",
         ]
+
+    def test_an_untrusted_property_list_names_uninstall_as_the_way_out_because_install_stops_at_the_same_error(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.untrusted_property_list(monkeypatch)
+
+        finding = only(doctor.diagnose_agent(paths, None), "cannot be trusted")
+
+        assert finding.fix is not None
+        assert "`usagedash agent uninstall`" in finding.fix
+        assert "removes a property list it cannot trust without starting it" in finding.fix
+        assert "`agent install` alone reads the same property list and stops at the same error" in finding.fix
+
+    def test_installed_settings_that_cannot_be_read_get_the_same_way_out(self, tmp_path: Path) -> None:
+        findings = doctor.settings_findings(None, ConfigError("another account could change it"))
+
+        assert findings[0].fix is not None
+        assert "`usagedash agent uninstall`" in findings[0].fix
+
+    def test_launchd_that_cannot_be_asked_names_what_to_check(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def unreachable(_paths: agent.AgentPaths) -> agent.ServiceState | None:
+            raise agent.AgentError("launchctl print could not be run: FileNotFoundError")
+
+        monkeypatch.setattr(agent, "service_state", unreachable)
+
+        finding = only(doctor.diagnose_agent(paths, None), "launchd cannot be asked")
+
+        assert finding.fix == "Check that `/bin/launchctl` runs in this terminal, then run `usagedash doctor` again."
 
     def test_launchd_that_cannot_be_asked_is_a_failure(
         self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
@@ -578,7 +616,70 @@ class TestWhetherTheDashboardAnswers:
         finding = only(doctor.diagnose_agent(paths, PORT), "nothing is listening")
 
         assert finding.level is Level.FAIL
-        assert "wait ten seconds" in finding.details[0]
+        assert finding.details == ("It may still be starting.",)
+        assert finding.fix == (
+            "Wait ten seconds, then run `usagedash doctor` again. If it stays like this, the log lines below "
+            "say why it could not start."
+        )
+
+    @pytest.mark.parametrize(
+        ("health", "title"),
+        [
+            (
+                HealthResult(HealthKind.ANSWERED, 500),
+                "The agent (pid 838) holds port 9123, but its health check answers HTTP 500",
+            ),
+            (
+                HealthResult(HealthKind.TIMED_OUT),
+                "The agent (pid 838) holds port 9123, but it did not answer within 2 seconds",
+            ),
+            (
+                HealthResult(HealthKind.FAILED),
+                "The agent (pid 838) holds port 9123, but the health request failed before an answer",
+            ),
+        ],
+    )
+    def test_an_agent_that_holds_the_port_but_answers_badly_is_restarted_not_moved(
+        self,
+        paths: agent.AgentPaths,
+        machine: Machine,
+        monkeypatch: pytest.MonkeyPatch,
+        health: HealthResult,
+        title: str,
+    ) -> None:
+        def never(_port: int) -> bool:
+            raise AssertionError("a different port cannot help an agent that holds this one")
+
+        monkeypatch.setattr(doctor, "_port_is_free", never)
+        machine.health, machine.holder = health, PortHolder(838, "python3.13")
+
+        finding = only(doctor.diagnose_agent(paths, PORT), "holds port")
+
+        assert finding.level is Level.FAIL
+        assert finding.title == title
+        assert finding.details == ("No other program is in the way, so a different port will not help.",)
+        assert finding.fix == "Restart it with `usagedash agent install`. If this comes back, read the log lines below."
+
+    def test_a_listener_that_is_not_the_agent_is_still_blamed_and_moved_off_when_it_answers_badly(
+        self, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        machine.health, machine.holder = HealthResult(HealthKind.ANSWERED, 500), PortHolder(99, "python3.13")
+
+        finding = only(doctor.diagnose_agent(paths, PORT), "Something other than the dashboard")
+
+        assert finding.details == (f"Port {PORT} is held by python3.13 (pid 99).",)
+        assert finding.fix is not None
+        assert "move the dashboard" in finding.fix
+
+    def test_a_holder_that_could_not_be_seen_is_not_assumed_to_be_the_agent(
+        self, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        machine.health, machine.holder = HealthResult(HealthKind.TIMED_OUT), None
+
+        finding = only(doctor.diagnose_agent(paths, PORT), "accepted a connection")
+
+        assert finding.fix is not None
+        assert "move the dashboard" in finding.fix
 
     def test_nothing_listening_with_no_agent_process_points_back_at_the_agent_problem(
         self, paths: agent.AgentPaths, machine: Machine
@@ -611,9 +712,12 @@ class TestWhetherTheDashboardAnswers:
 
 class TestTheFullDiagnosis:
     @pytest.fixture(autouse=True)
-    def a_quiet_machine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def a_quiet_machine(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(agent, "agent_path_omissions", lambda _executables: [])
         monkeypatch.setattr(doctor, "checked_executable", lambda executable, _purpose: str(executable))
+        # Why: a bare CLI name is looked up on the agent's PATH, which falls back to this shell's when no
+        # agent is installed. This machine's own PATH may well hold the real CLIs.
+        monkeypatch.setenv("PATH", str(tmp_path / "no-clis-here"))
 
     def test_a_healthy_installation_has_no_warning_no_failure_and_no_log_section(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
@@ -626,6 +730,38 @@ class TestTheFullDiagnosis:
         assert not [finding for finding in findings if finding.level in (Level.WARN, Level.FAIL)]
         assert not [title for title in titles(findings) if title.startswith("Last lines")]
         assert doctor.has_failure(findings) is False
+
+    def test_a_warning_alone_does_not_add_the_log_lines_to_the_report(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        machine.state = agent.ServiceState(None, None, None, None, None)
+        machine.health = HealthResult(HealthKind.ANSWERED, 200)
+        write_log(paths.server_log, "2026-11-01 INFO usagedash.api: collected\n")
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
+
+        assert titles(findings, Level.WARN) == ["launchd lists the agent but is not running it"]
+        assert not [title for title in titles(findings) if title.startswith("Last lines")]
+
+    def test_two_logs_that_end_the_same_way_are_shown_once(self, paths: agent.AgentPaths) -> None:
+        mirrored = "2026-11-01 ERROR usagedash.cli: could not bind\n"
+        write_log(paths.launchd_logs[1], mirrored)
+        write_log(paths.server_log, mirrored)
+
+        findings = doctor.log_findings(paths)
+
+        assert titles(findings) == [f"Last lines of {paths.launchd_logs[1]}"]
+
+    def test_two_logs_that_differ_are_both_shown(self, paths: agent.AgentPaths) -> None:
+        write_log(paths.launchd_logs[1], "Traceback (most recent call last):\n")
+        write_log(paths.server_log, "2026-11-01 ERROR usagedash.cli: could not bind\n")
+
+        findings = doctor.log_findings(paths)
+
+        assert titles(findings) == [
+            f"Last lines of {paths.launchd_logs[1]}",
+            f"Last lines of {paths.server_log}",
+        ]
 
     def test_a_problem_adds_the_log_lines_to_the_report(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
@@ -788,17 +924,14 @@ class TestTheFullDiagnosis:
         )
 
     def test_the_binaries_the_agent_was_installed_with_are_checked_not_the_ones_this_shell_finds(
-        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
     ) -> None:
-        pinned = tmp_path / "pinned-claude"
-        pinned.write_text("#!/bin/sh\n")
-        pinned.chmod(0o755)
-        monkeypatch.setattr(doctor, "canonical_executable", lambda executable: executable)
+        pinned = executable_file(tmp_path / "pinned-claude")
         served = replace(settings_for(tmp_path), binaries=Binaries(str(pinned), "codex", "grok"))
 
         findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=served)
 
-        assert only(findings, "claude: ").title == f"claude: {pinned}"
+        assert only(findings, "claude: ").title == f"claude: {pinned.resolve()}"
         assert "claude: not found on PATH" not in titles(findings)
 
     def test_the_installed_binaries_are_still_checked_when_this_shells_settings_do_not_load(
@@ -809,44 +942,92 @@ class TestTheFullDiagnosis:
         assert only(findings, "claude: not found").level is Level.INFO
         assert only(findings, "The settings cannot be loaded").level is Level.FAIL
 
-    def test_a_cli_link_that_points_at_nothing_is_a_warning_not_an_ok(
+    def test_a_bare_cli_name_is_found_on_the_path_the_agent_runs_with(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        on_agent_path = executable_file(tmp_path / "agent-bin" / "claude")
+        machine.environment = {"PATH": str(on_agent_path.parent)}
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=settings_for(tmp_path))
+
+        assert only(findings, "claude: ").title == f"claude: {on_agent_path.resolve()}"
+        assert only(findings, "codex: not found").level is Level.INFO
+
+    def test_without_an_installed_agent_a_bare_name_is_looked_up_on_this_shells_path(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        on_shell_path = executable_file(tmp_path / "shell-bin" / "codex")
+        monkeypatch.setenv("PATH", str(on_shell_path.parent))
+        machine.environment, machine.state = None, None
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
+
+        assert only(findings, "codex: ").title == f"codex: {on_shell_path.resolve()}"
+
+    def test_a_pin_whose_file_was_removed_is_judged_by_the_replacement_the_agent_finds(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # A Homebrew cask upgrade deletes the version directory the pin names; the agent then looks the
+        # vendor command up on its own PATH (README, "A recorded file that has been removed").
+        current = executable_file(tmp_path / "bin" / "codex")
+        removed = tmp_path / "Caskroom" / "0.165.0" / "bin" / "codex-0.165.0"
+        machine.environment = {"PATH": str(current.parent)}
+        served = replace(settings_for(tmp_path), binaries=Binaries("claude", str(removed), "grok"))
+
+        with caplog.at_level("WARNING"):
+            finding = only(doctor.diagnose(paths, shell=None, served=served), "codex: ")
+
+        assert finding.level is Level.WARN
+        assert finding.title == f"codex: the recorded {removed} is gone; the agent uses {current.resolve()}"
+        assert finding.fix == "Run `usagedash agent install` to record the current file."
+        assert caplog.messages == []
+        assert logging.root.manager.disable == 0
+
+    def test_a_pin_whose_file_was_removed_with_no_replacement_is_a_warning_that_says_to_reinstall(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        removed = tmp_path / "gone" / "claude"
+        settings = replace(settings_for(tmp_path), binaries=Binaries(str(removed), "codex", "grok"))
+
+        finding = only(doctor.diagnose(paths, shell=settings, served=None), "claude: ")
+
+        assert finding.level is Level.WARN
+        assert finding.title.startswith(f"claude: cannot use {removed}: FileNotFoundError")
+        assert finding.fix == "Install claude again, then run `usagedash agent install`."
+
+    def test_a_cli_link_that_points_at_nothing_is_a_warning_not_an_ok(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
     ) -> None:
         dangling = tmp_path / "claude"
         dangling.symlink_to(tmp_path / "removed")
-        monkeypatch.setattr(doctor, "canonical_executable", lambda executable: tmp_path / "removed")
         settings = replace(settings_for(tmp_path), binaries=Binaries(str(dangling), "codex", "grok"))
 
         finding = only(doctor.diagnose(paths, shell=settings, served=None), "claude: ")
 
         assert finding.level is Level.WARN
-        assert finding.title == f"claude: {tmp_path / 'removed'} is not a file"
+        assert finding.title == f"claude: {tmp_path.resolve() / 'removed'} is not a file"
         assert finding.fix == "Install claude again, then run `usagedash agent install`."
 
     def test_a_cli_that_is_a_folder_is_a_warning_not_an_ok(
-        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
     ) -> None:
         folder = tmp_path / "claude"
         folder.mkdir()
-        monkeypatch.setattr(doctor, "canonical_executable", lambda executable: executable)
         settings = replace(settings_for(tmp_path), binaries=Binaries(str(folder), "codex", "grok"))
 
         assert only(doctor.diagnose(paths, shell=settings, served=None), "claude: ").level is Level.WARN
 
     def test_a_cli_without_the_execute_bit_is_a_warning_that_names_the_chmod(
-        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
     ) -> None:
-        plain = tmp_path / "claude"
-        plain.write_text("#!/bin/sh\n")
-        plain.chmod(0o644)
-        monkeypatch.setattr(doctor, "canonical_executable", lambda executable: executable)
+        plain = executable_file(tmp_path / "claude", 0o644)
         settings = replace(settings_for(tmp_path), binaries=Binaries(str(plain), "codex", "grok"))
 
         finding = only(doctor.diagnose(paths, shell=settings, served=None), "claude: ")
 
         assert finding.level is Level.WARN
-        assert finding.title == f"claude: {plain} is not executable"
-        assert finding.fix == f"Run `chmod u+x {plain}`, then `usagedash agent install`."
+        assert finding.title == f"claude: {plain.resolve()} is not executable"
+        assert finding.fix == f"Run `chmod u+x {plain.resolve()}`, then `usagedash agent install`."
 
     def test_a_vendor_cli_that_is_not_installed_is_information_not_a_problem(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
@@ -856,37 +1037,19 @@ class TestTheFullDiagnosis:
         for name in ("claude", "codex", "grok"):
             assert only(findings, f"{name}: not found").level is Level.INFO
 
-    def test_a_configured_cli_path_that_does_not_exist_is_a_warning(
+    def test_a_cli_another_account_could_change_is_a_warning_and_a_good_one_is_ok(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
     ) -> None:
-        settings = settings_for(tmp_path)
-        settings = replace(settings, binaries=Binaries(str(tmp_path / "gone"), "codex", "grok"))
-
-        finding = only(doctor.diagnose(paths, shell=settings, served=None), "gone does not exist")
-
-        assert finding.level is Level.WARN
-        assert finding.title.startswith("claude: ")
-
-    def test_a_cli_another_account_could_change_is_a_warning_and_a_good_one_is_ok(
-        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        good, bad = tmp_path / "good", tmp_path / "bad"
-        good.write_text("")
-        good.chmod(0o755)
-        bad.write_text("")
-
-        def canonical(executable: Path) -> Path:
-            if executable == bad:
-                raise ConfigError(f"cannot use {executable}: its permissions (0777) let other accounts write to it")
-            return executable
-
-        monkeypatch.setattr(doctor, "canonical_executable", canonical)
+        good = executable_file(tmp_path / "good")
+        bad = executable_file(tmp_path / "bad", 0o777)
         settings = replace(settings_for(tmp_path), binaries=Binaries(str(good), str(bad), "grok"))
 
         findings = doctor.diagnose(paths, shell=settings, served=None)
 
         assert only(findings, "claude: ").level is Level.OK
-        assert only(findings, "codex: ").level is Level.WARN
+        unsafe = only(findings, "codex: ")
+        assert unsafe.level is Level.WARN
+        assert "its permissions (0777) let other accounts write" in unsafe.title
 
     def test_a_vendor_cli_directory_left_off_the_path_is_a_warning_with_its_reason(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
@@ -994,10 +1157,19 @@ class TestTheReport:
         assert doctor.render([Finding(Level.WARN, "w")] * 2, tmp_path).endswith(
             "Result: working, with 2 warnings. 2 checks ran."
         )
-        assert "Result: 2 problems found." in doctor.render([Finding(Level.FAIL, "f")] * 2, tmp_path)
+        assert "Result: 2 problems found." in doctor.render([Finding(Level.FAIL, "f", fix="do this")] * 2, tmp_path)
 
     def test_a_warning_alone_is_not_a_failure(self) -> None:
         assert doctor.has_failure([Finding(Level.WARN, "w"), Finding(Level.OK, "o")]) is False
+
+    @pytest.mark.parametrize("fix", [None, ""])
+    def test_a_failure_that_names_no_next_step_cannot_be_built(self, fix: str | None) -> None:
+        with pytest.raises(ValueError, match="a FAIL must name the next step: broken"):
+            Finding(Level.FAIL, "broken", ("because",), fix)
+
+    @pytest.mark.parametrize("level", [Level.OK, Level.INFO, Level.WARN])
+    def test_a_finding_that_is_not_a_failure_needs_no_next_step(self, level: Level) -> None:
+        assert Finding(level, "fine").fix is None
 
     def test_the_home_folder_is_shown_as_a_tilde_only_where_it_is_a_whole_path_prefix(self) -> None:
         home = Path("/Users/greg")
@@ -1263,7 +1435,10 @@ class TestTheDoctorCommand:
 
         assert cli.main(["doctor"]) == cli.EXIT_FAILURE
 
-        assert "[FAIL] The settings cannot be loaded: cannot use" in capsys.readouterr().out
+        output = capsys.readouterr().out
+        assert "[FAIL] The settings cannot be loaded: cannot use" in output
+        assert "If it says a file's permissions are unsafe, make that file writable by you alone" in output
+        assert "(`chmod go-w <file>`)" in output
         assert stat.S_IMODE(config.stat().st_mode) == 0o666
 
     def test_a_problem_exits_one_and_never_prints_the_home_folder(

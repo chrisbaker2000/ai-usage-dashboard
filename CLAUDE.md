@@ -183,8 +183,15 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   agent's (its plist pins the CLIs), not this shell's; only the PATH check asks what an install from this
   shell would do. The data directory is checked as install requires it, a real folder this account owns, not
   only by its ancestors: `ensure_no_ancestor_lets_another_account_replace` skips the last entry. A CLI passes
-  only if `canonical_executable` accepts it and it is also an existing, executable file, which that check
-  does not require. The one thing it ever binds is a loopback port, briefly, to suggest a free one
+  only if the collector's own resolution accepts it (`executables.checked_command`, against the PATH the plist
+  records, or this shell's when nothing is installed, with the vendor command as the fallback name) and the
+  result is also an existing, executable file, which that check does not require. Diagnose by calling what
+  the runtime calls, not by restating its rules: a pin whose file a Homebrew cask upgrade removed still works
+  through the fallback, and a rule-by-rule copy called it missing. Resolution's own log record is silenced
+  for the report (`doctor._logging_silenced`). **A `FAIL` must name a next step** (`Finding.__post_init__`
+  refuses one that does not), and a remedy must be one this package's own commands can carry out: an
+  untrusted property list is cleared with `agent uninstall`, because `agent install` reads the same
+  property list through the same trust check and stops at the same error. The one thing it ever binds is a loopback port, briefly, to suggest a free one
   (`doctor.suggest_port`), and only when a conflict is found. The remedy says to change `USAGEDASH_PORT`
   when this shell sets it, because it outranks the config file. Output shows
   the home folder as `~` (`doctor.abbreviate_home`) because users paste it into issues. Logs are read
