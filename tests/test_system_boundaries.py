@@ -4625,7 +4625,7 @@ class TestCommandLine:
     def test_the_package_can_be_run_as_a_module(
         self, data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(agent, "is_loaded", lambda _paths: False)
+        monkeypatch.setattr(agent, "service_state", lambda _paths: None)
         monkeypatch.setattr(sys, "argv", ["usagedash", "agent", "status"])
 
         with pytest.raises(SystemExit) as exited:
@@ -5556,7 +5556,7 @@ class TestCommandLine:
         action: str,
         defect: str,
     ) -> None:
-        monkeypatch.setattr(agent, "is_loaded", lambda _paths: False)
+        monkeypatch.setattr(agent, "service_state", lambda _paths: None)
         removed: list[agent.AgentPaths] = []
         monkeypatch.setattr(agent, "uninstall", removed.append)
         chosen: Path | None = None
@@ -5663,7 +5663,7 @@ class TestCommandLine:
     def test_agent_status_reports_whether_the_agent_is_loaded(
         self, data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(agent, "is_loaded", lambda _paths: False)
+        monkeypatch.setattr(agent, "service_state", lambda _paths: None)
         assert cli.main(["agent", "status"]) == 0
         assert capsys.readouterr().out.strip().endswith("not loaded")
 
@@ -6077,7 +6077,7 @@ class TestCommandLine:
         self, data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.setenv("USAGEDASH_PORT", "80")
-        monkeypatch.setattr(agent, "is_loaded", lambda _paths: False)
+        monkeypatch.setattr(agent, "service_state", lambda _paths: None)
         removed: list[agent.AgentPaths] = []
         monkeypatch.setattr(agent, "uninstall", removed.append)
 

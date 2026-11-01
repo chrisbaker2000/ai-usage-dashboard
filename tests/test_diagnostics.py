@@ -485,6 +485,106 @@ class TestTheAgentChecks:
         ]
 
 
+AGENT_CASES: list[tuple[str, agent.ServiceState | None, bool, doctor.AgentStatus]] = [
+    ("not loaded", None, True, doctor.AgentStatus.STOPPED),
+    ("waiting", agent.ServiceState("waiting", None, 1, "(never exited)", None), True, doctor.AgentStatus.STOPPED),
+    ("crashed", CRASHED, True, doctor.AgentStatus.STOPPED),
+    ("running", RUNNING, True, doctor.AgentStatus.RUNNING),
+    ("state not stated", agent.ServiceState(None, None, None, None, None), True, doctor.AgentStatus.UNKNOWN),
+    ("running without a pid", agent.ServiceState("running", None, 1, None, None), True, doctor.AgentStatus.UNKNOWN),
+    ("launchd unreachable", None, False, doctor.AgentStatus.UNKNOWN),
+]
+HOLDERS: dict[str, PortHolder | None] = {
+    "nobody seen": None,
+    "the agent's pid": PortHolder(838, "python3.13"),
+    "another pid": PortHolder(99, "workerd"),
+}
+HEALTHS: dict[str, HealthResult] = {
+    "200": HealthResult(HealthKind.ANSWERED, 200),
+    "404": HealthResult(HealthKind.ANSWERED, 404),
+    "500": HealthResult(HealthKind.ANSWERED, 500),
+    "refused": HealthResult(HealthKind.REFUSED),
+    "timed out": HealthResult(HealthKind.TIMED_OUT),
+    "failed": HealthResult(HealthKind.FAILED),
+}
+
+
+class TestNothingIsClaimedThatTheEvidenceDoesNotAllow:
+    """Every combination of what launchd says, who holds the port, and what the health request got.
+
+    Each input can be unknown, and an unknown input must never count as evidence for either side. The
+    findings that blame a party or clear one are checked against what is known, not against a table.
+    """
+
+    @pytest.fixture(autouse=True)
+    def every_nearby_port_is_free(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(doctor, "_port_is_free", lambda _port: True)
+        monkeypatch.delenv("USAGEDASH_PORT", raising=False)
+
+    @pytest.mark.parametrize("agent_case", AGENT_CASES, ids=[case[0] for case in AGENT_CASES])
+    @pytest.mark.parametrize("holder_id", HOLDERS)
+    @pytest.mark.parametrize("health_id", HEALTHS)
+    def test_a_finding_blames_or_clears_a_party_only_as_far_as_the_evidence_goes(
+        self,
+        paths: agent.AgentPaths,
+        machine: Machine,
+        monkeypatch: pytest.MonkeyPatch,
+        agent_case: tuple[str, agent.ServiceState | None, bool, doctor.AgentStatus],
+        holder_id: str,
+        health_id: str,
+    ) -> None:
+        _, state, reachable, status = agent_case
+        if reachable:
+            machine.state = state
+        else:
+
+            def unreachable(_paths: agent.AgentPaths) -> agent.ServiceState | None:
+                raise agent.AgentError("launchctl print could not be run: FileNotFoundError")
+
+            monkeypatch.setattr(agent, "service_state", unreachable)
+        holder, health = HOLDERS[holder_id], HEALTHS[health_id]
+        machine.holder, machine.health = holder, health
+
+        answers = [finding for finding in doctor.diagnose_agent(paths, PORT) if str(PORT) in finding.title]
+
+        assert len(answers) == 1
+        answer = answers[0]
+        stopped = status is doctor.AgentStatus.STOPPED
+        running = status is doctor.AgentStatus.RUNNING
+        unknown = status is doctor.AgentStatus.UNKNOWN
+        agent_holds = running and holder is not None and holder.pid == 838
+        other_holds = holder is not None and (stopped or (running and holder.pid != 838))
+        healthy = health.kind is HealthKind.ANSWERED and health.status == 200
+        title = answer.title
+
+        assert ("the agent is not running" in title) <= stopped
+        assert (
+            "Something other than the dashboard" in title
+            or "is not the one holding it" in title
+            or "something else is serving it" in title
+        ) <= (stopped or other_holds)
+        assert title.startswith("The agent (pid") <= agent_holds
+        assert ("could not tell whether the agent is serving it" in title) == (healthy and unknown)
+        assert (answer.level is Level.OK) <= (healthy and running and not other_holds)
+        if healthy and stopped:
+            assert answer.level is Level.FAIL
+        if healthy and running:
+            assert answer.level is (Level.FAIL if other_holds else Level.OK)
+        if not healthy and health.kind is not HealthKind.REFUSED and agent_holds:
+            assert "Restart it with `usagedash agent install`" in (answer.fix or "")
+            assert "move the dashboard" not in (answer.fix or "")
+        if not healthy and health.kind is not HealthKind.REFUSED and not agent_holds and (stopped or other_holds):
+            assert "move the dashboard" in (answer.fix or "")
+        if (
+            not healthy
+            and health.kind is not HealthKind.REFUSED
+            and not agent_holds
+            and not stopped
+            and not other_holds
+        ):
+            assert (answer.fix or "").startswith("Restart the agent with `usagedash agent install`")
+
+
 class TestSuggestingAPort:
     @staticmethod
     def free_except(*taken: int) -> Callable[[int], bool]:
@@ -571,8 +671,8 @@ class TestWhetherTheDashboardAnswers:
 
     @pytest.mark.parametrize(
         "state",
-        [None, agent.ServiceState(None, None, None, None, None), CRASHED],
-        ids=["not loaded", "loaded but not running", "crashed"],
+        [None, agent.ServiceState("waiting", None, 1, "(never exited)", None), CRASHED],
+        ids=["not loaded", "loaded and waiting", "crashed"],
     )
     def test_a_healthy_answer_is_not_ok_while_the_agent_is_not_running_and_a_visible_process_serves_it(
         self, paths: agent.AgentPaths, machine: Machine, state: agent.ServiceState | None
@@ -592,17 +692,57 @@ class TestWhetherTheDashboardAnswers:
     def test_a_healthy_answer_is_not_ok_while_the_agent_is_not_running_even_when_the_holder_cannot_be_seen(
         self, paths: agent.AgentPaths, machine: Machine
     ) -> None:
-        machine.state, machine.holder = agent.ServiceState(None, None, None, None, None), None
+        machine.state, machine.holder = agent.ServiceState("waiting", None, 1, "(never exited)", None), None
 
         finding = only(doctor.diagnose_agent(paths, PORT), "the agent is not running")
 
         assert finding.level is Level.FAIL
         assert not [detail for detail in finding.details if detail.startswith("Port ")]
 
+    @pytest.mark.parametrize(
+        "state",
+        [agent.ServiceState(None, None, None, None, None), agent.ServiceState("running", None, 1, None, None)],
+        ids=["state not stated", "says running without a pid"],
+    )
+    def test_a_healthy_answer_is_not_blamed_on_another_process_when_launchds_state_does_not_say(
+        self, paths: agent.AgentPaths, machine: Machine, state: agent.ServiceState
+    ) -> None:
+        machine.state, machine.holder = state, PortHolder(838, "python3.13")
+
+        findings = doctor.diagnose_agent(paths, PORT)
+
+        finding = only(findings, "could not tell whether the agent is serving it")
+        assert finding.level is Level.WARN
+        assert finding.details == (
+            "launchd's state for the agent could not be read.",
+            f"Port {PORT} is held by python3.13 (pid 838).",
+        )
+        assert (
+            finding.fix == "Run `usagedash agent status`. If the agent is not running, run `usagedash agent install`."
+        )
+        assert "the agent is not running, so something else" not in " ".join(titles(findings))
+        assert "Something other than the dashboard" not in " ".join(titles(findings))
+
+    def test_a_healthy_answer_is_not_blamed_on_another_process_when_launchd_cannot_be_asked(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def unreachable(_paths: agent.AgentPaths) -> agent.ServiceState | None:
+            raise agent.AgentError("launchctl print could not be run: FileNotFoundError")
+
+        monkeypatch.setattr(agent, "service_state", unreachable)
+        machine.holder = PortHolder(99, "python3.13")
+
+        findings = doctor.diagnose_agent(paths, PORT)
+
+        assert only(findings, "launchd cannot be asked").level is Level.FAIL
+        assert only(findings, "could not tell whether the agent is serving it").level is Level.WARN
+        assert "the agent is not running, so something else" not in " ".join(titles(findings))
+
     def test_the_report_does_not_end_in_working_when_the_agent_is_not_the_one_serving(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
     ) -> None:
-        machine.state, machine.holder = agent.ServiceState(None, None, None, None, None), PortHolder(99, "python3.13")
+        machine.state = agent.ServiceState("waiting", None, 1, "(never exited)", None)
+        machine.holder = PortHolder(99, "python3.13")
 
         findings = doctor.diagnose_agent(paths, PORT)
         report = doctor.render(findings, tmp_path)
@@ -916,6 +1056,34 @@ class TestTheFullDiagnosis:
 
         assert machine.probed == ["http://127.0.0.1:9200/healthz"]
         assert only(findings, "serves port 9200").level is Level.INFO
+
+    def test_installed_settings_that_cannot_be_read_are_not_replaced_by_this_shells_in_the_checks_that_follow(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        findings = doctor.diagnose(
+            paths, shell=settings_for(tmp_path, 9123), served=ConfigError("port must be an integer, got 'x'")
+        )
+
+        assert machine.probed == []
+        assert only(findings, "installed agent's settings").level is Level.FAIL
+        assert not [title for title in titles(findings) if "data directory" in title]
+        assert not [title for title in titles(findings) if title.startswith(("claude:", "codex:", "grok:"))]
+        assert not [
+            title
+            for title in titles(findings)
+            if title.startswith(("The dashboard answers", "Nothing is listening", "Port 9123", "The request to port"))
+        ]
+        assert "launchd is running the agent (pid 838)" in titles(findings)
+
+    def test_this_shells_settings_stand_in_only_when_no_agent_is_installed(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        machine.environment, machine.state = None, None
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path, 9123), served=None)
+
+        assert machine.probed == ["http://127.0.0.1:9123/healthz"]
+        assert any("data directory" in title for title in titles(findings))
 
     def test_the_same_port_everywhere_is_not_reported_as_a_difference(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
@@ -1481,13 +1649,61 @@ class TestFindingWhoHoldsAPort:
     def test_lsof_is_asked_for_the_listener_and_its_first_process_is_returned(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        run = FakeRun(stdout="p838\ncpython3.13\np900\ncother\n")
+        run = FakeRun(stdout="p838\ncpython3.13\nf12\nn127.0.0.1:8787\np900\ncother\nf3\nn127.0.0.1:8787\n")
         monkeypatch.setattr(doctor.subprocess, "run", run)
 
         assert doctor.port_holder(8787) == PortHolder(838, "python3.13")
-        assert run.commands == [[doctor.LSOF_BINARY, "-nP", "-iTCP:8787", "-sTCP:LISTEN", "-Fpc"]]
+        assert run.commands == [[doctor.LSOF_BINARY, "-nP", "-iTCP:8787", "-sTCP:LISTEN", "-Fpcn"]]
 
-    @pytest.mark.parametrize("output", ["", "pabc\ncfoo\n", "p12\n", "cfoo\n", "garbage"])
+    @pytest.mark.parametrize(
+        ("listener", "found"),
+        [
+            ("127.0.0.1:8787", True),
+            ("*:8787", True),
+            ("192.168.1.5:8787", False),
+            ("10.0.0.2:8787", False),
+            ("[::1]:8787", False),
+            ("[::]:8787", False),
+            ("localhost:8787", False),
+            ("8787", False),
+            ("", False),
+        ],
+    )
+    def test_only_a_listener_the_loopback_address_reaches_counts_as_the_holder(
+        self, monkeypatch: pytest.MonkeyPatch, listener: str, found: bool
+    ) -> None:
+        monkeypatch.setattr(doctor.subprocess, "run", FakeRun(stdout=f"p838\ncpython3.13\nf12\nn{listener}\n"))
+
+        assert (doctor.port_holder(8787) == PortHolder(838, "python3.13")) is found
+
+    def test_a_listener_on_another_interface_does_not_hide_the_one_that_answers_the_loopback_address(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = "p7\ncelsewhere\nf4\nn192.168.1.5:8787\np838\ncpython3.13\nf12\nn127.0.0.1:8787\n"
+        monkeypatch.setattr(doctor.subprocess, "run", FakeRun(stdout=output))
+
+        assert doctor.port_holder(8787) == PortHolder(838, "python3.13")
+
+    def test_one_process_with_a_listener_elsewhere_and_one_on_loopback_is_the_holder(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = "p838\ncpython3.13\nf4\nn192.168.1.5:8787\nf5\nn127.0.0.1:8787\n"
+        monkeypatch.setattr(doctor.subprocess, "run", FakeRun(stdout=output))
+
+        assert doctor.port_holder(8787) == PortHolder(838, "python3.13")
+
+    @pytest.mark.parametrize(
+        "output",
+        [
+            "",
+            "pabc\ncfoo\nn127.0.0.1:8787\n",
+            "p12\n",
+            "cfoo\n",
+            "garbage",
+            "n127.0.0.1:8787\n",
+            "p-4\nn127.0.0.1:8787\n",
+        ],
+    )
     def test_output_that_does_not_name_a_process_means_none_is_found(
         self, monkeypatch: pytest.MonkeyPatch, output: str
     ) -> None:
@@ -1501,7 +1717,7 @@ class TestFindingWhoHoldsAPort:
             assert doctor.port_holder(8787) is None
 
     def test_a_command_name_is_made_printable(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(doctor.subprocess, "run", FakeRun(stdout="p5\nca\x1bb\n"))
+        monkeypatch.setattr(doctor.subprocess, "run", FakeRun(stdout="p5\nca\x1bb\nf3\nn127.0.0.1:8787\n"))
 
         assert doctor.port_holder(8787) == PortHolder(5, "a?b")
 
@@ -1604,6 +1820,40 @@ class TestTheDoctorCommand:
         assert "Result: all" in output
         assert "FAIL" not in output
         assert not (home / "data").exists()
+
+    def test_the_config_directory_is_guarded_as_agent_install_guards_it(
+        self, home: Path, machine: Machine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        machine.environment = {}
+        guarded: list[Path] = []
+
+        def refuse(config_file: Path) -> None:
+            guarded.append(config_file)
+            raise ConfigError(f"cannot use {config_file.parent}: another account could replace it")
+
+        monkeypatch.setattr(cli.standing, "_refuse_replaceable_config_directory", refuse)
+
+        assert cli.main(["doctor"]) == cli.EXIT_FAILURE
+
+        output = capsys.readouterr().out
+        assert guarded == [home / "data" / "config.toml"]
+        assert (
+            f"[FAIL] The settings cannot be loaded: cannot use {home / 'data'}: another account could replace it"
+            in (output.replace("~", str(home)))
+        )
+        assert "Settings load:" not in output
+
+    def test_a_config_directory_that_passes_the_guard_loads_the_settings(
+        self, home: Path, machine: Machine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        machine.environment = {}
+        guarded: list[Path] = []
+        monkeypatch.setattr(cli.standing, "_refuse_replaceable_config_directory", guarded.append)
+
+        cli.main(["doctor"])
+
+        assert guarded == [home / "data" / "config.toml"]
+        assert "[ok  ] Settings load:" in capsys.readouterr().out
 
     def test_a_config_file_other_accounts_can_read_is_made_owner_only_as_every_command_does(
         self, home: Path, machine: Machine
@@ -1860,23 +2110,38 @@ class TestAgentStatus:
     def label(self, home: Path) -> str:
         return agent.agent_paths().label
 
-    def test_an_agent_launchd_does_not_list_is_one_line_and_launchd_is_not_asked_for_more(
+    def test_an_agent_launchd_does_not_list_is_one_line(
         self, home: Path, label: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        def not_asked(_paths: agent.AgentPaths) -> agent.ServiceState | None:
-            raise AssertionError("a service that is not loaded has no state to ask for")
-
-        monkeypatch.setattr(agent, "is_loaded", lambda _paths: False)
-        monkeypatch.setattr(agent, "service_state", not_asked)
+        monkeypatch.setattr(agent, "service_state", lambda _paths: None)
 
         assert cli.main(["agent", "status"]) == cli.EXIT_OK
 
         assert capsys.readouterr().out == f"{label}: not loaded\n"
 
+    def test_status_asks_launchd_once_so_a_stopping_service_cannot_read_as_loaded_and_not_running(
+        self, home: Path, label: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        asked: list[agent.AgentPaths] = []
+
+        def one_snapshot(paths: agent.AgentPaths) -> agent.ServiceState | None:
+            asked.append(paths)
+            return None
+
+        def never(_paths: agent.AgentPaths) -> bool:
+            raise AssertionError("a second question leaves a gap in which the answer can change")
+
+        monkeypatch.setattr(agent, "service_state", one_snapshot)
+        monkeypatch.setattr(agent, "is_loaded", never)
+
+        cli.main(["agent", "status"])
+
+        assert len(asked) == 1
+        assert capsys.readouterr().out == f"{label}: not loaded\n"
+
     def test_a_running_agent_shows_its_pid_runs_logs_and_the_doctor_command(
         self, home: Path, label: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(agent, "is_loaded", lambda _paths: True)
         monkeypatch.setattr(agent, "service_state", lambda _paths: RUNNING)
 
         assert cli.main(["agent", "status"]) == cli.EXIT_OK
@@ -1891,7 +2156,6 @@ class TestAgentStatus:
     def test_a_loaded_agent_that_crashed_is_not_called_running(
         self, home: Path, label: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(agent, "is_loaded", lambda _paths: True)
         monkeypatch.setattr(agent, "service_state", lambda _paths: CRASHED)
 
         assert cli.main(["agent", "status"]) == cli.EXIT_OK
@@ -1903,7 +2167,6 @@ class TestAgentStatus:
     def test_a_loaded_agent_killed_by_a_signal_is_reported_by_the_signal_not_an_exit_code(
         self, home: Path, label: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(agent, "is_loaded", lambda _paths: True)
         monkeypatch.setattr(
             agent, "service_state", lambda _paths: agent.ServiceState("waiting", None, 2, "(never exited)", "Killed: 9")
         )
@@ -1917,7 +2180,6 @@ class TestAgentStatus:
     def test_a_loaded_agent_with_no_process_and_no_failure_names_launchds_state(
         self, home: Path, label: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(agent, "is_loaded", lambda _paths: True)
         monkeypatch.setattr(
             agent, "service_state", lambda _paths: agent.ServiceState("waiting", None, None, None, None)
         )
@@ -1926,11 +2188,10 @@ class TestAgentStatus:
 
         assert capsys.readouterr().out.splitlines()[0] == f"{label}: loaded, not running (waiting)"
 
-    def test_an_agent_that_vanished_between_the_two_questions_is_not_called_running(
+    def test_a_loaded_agent_whose_listing_states_nothing_is_not_called_running(
         self, home: Path, label: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        monkeypatch.setattr(agent, "is_loaded", lambda _paths: True)
-        monkeypatch.setattr(agent, "service_state", lambda _paths: None)
+        monkeypatch.setattr(agent, "service_state", lambda _paths: agent.ServiceState(None, None, None, None, None))
 
         cli.main(["agent", "status"])
 

@@ -503,10 +503,12 @@ def _manage_installed_agent(action: str) -> int:
     """
     paths = agent.agent_paths()
     if action == "status":
-        if not agent.is_loaded(paths):
+        # Why one question: two (loaded, then its state) leave a gap in which a stopping service reads as
+        # loaded and not running.
+        state = agent.service_state(paths)
+        if state is None:
             print(f"{paths.label}: not loaded")
             return EXIT_OK
-        state = agent.service_state(paths) or agent.ServiceState(None, None, None, None, None)
         print("\n".join(_status_lines(paths, state)))
         return EXIT_OK
     removed = agent.uninstall(paths) or {}
@@ -526,6 +528,16 @@ def _settings_outcome(load: Callable[[], Settings | None]) -> doctor.SettingsOut
         return error
 
 
+def _shell_settings_as_install_sees_them() -> Settings:
+    """Load this shell's settings after the guard on the config directory that ``agent install`` applies first.
+
+    Raises:
+        ConfigError: if the config directory could be replaced by another account, or the settings are invalid.
+    """
+    standing._refuse_replaceable_config_directory(config_file())
+    return load_settings()
+
+
 def _doctor() -> int:
     """Run every check and print the result. Nothing is started, stopped, installed, or created.
 
@@ -535,7 +547,7 @@ def _doctor() -> int:
     paths = agent.agent_paths()
     findings = doctor.diagnose(
         paths,
-        shell=_settings_outcome(load_settings),
+        shell=_settings_outcome(_shell_settings_as_install_sees_them),
         served=_settings_outcome(_settings_the_installed_agent_serves),
     )
     print(doctor.render(findings, agent.account_home()))

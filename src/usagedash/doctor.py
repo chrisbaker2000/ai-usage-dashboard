@@ -126,14 +126,15 @@ def probe_health(url: str) -> HealthResult:
 
 
 def port_holder(port: int) -> PortHolder | None:
-    """Return the process listening on ``port`` that this account can see, or None when none is found.
+    """Return the process listening on ``port`` for connections to the loopback address, or None.
 
     ``lsof`` lists only this account's processes without administrator rights, so None means "none that
-    this account can see", not "free".
+    this account can see", not "free". A listener bound to another interface cannot answer the dashboard's
+    address and is not a holder.
     """
     try:
         result = subprocess.run(
-            [LSOF_BINARY, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpc"],
+            [LSOF_BINARY, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpcn"],
             capture_output=True,
             text=True,
             timeout=LSOF_TIMEOUT_SECONDS,
@@ -141,16 +142,27 @@ def port_holder(port: int) -> PortHolder | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    return _first_holder(result.stdout)
+    return _loopback_holder(result.stdout)
 
 
-def _first_holder(output: str) -> PortHolder | None:
+LOOPBACK_LISTENER_HOSTS = (LOOPBACK_HOST, "*")
+"""The hosts a listener is bound to when a connection to the loopback address reaches it: that address itself,
+or every IPv4 address. ``lsof`` prints the second as ``*``."""
+
+
+def _loopback_holder(output: str) -> PortHolder | None:
+    """Pick the first process in ``lsof -Fpcn`` output that has a listener the loopback address reaches."""
     pid: int | None = None
+    command = ""
     for line in output.splitlines():
-        if line.startswith("p") and line[1:].isascii() and line[1:].isdecimal():
-            pid = int(line[1:])
-        elif line.startswith("c") and pid is not None:
-            return PortHolder(pid, _printable(line[1:]))
+        field, value = line[:1], line[1:]
+        if field == "p":
+            pid = int(value) if value.isascii() and value.isdecimal() else None
+            command = ""
+        elif field == "c":
+            command = value
+        elif field == "n" and pid is not None and value.rpartition(":")[0] in LOOPBACK_LISTENER_HOSTS:
+            return PortHolder(pid, _printable(command))
     return None
 
 
@@ -473,13 +485,62 @@ def _move_fix(port: int) -> str:
     )
 
 
+class AgentStatus(StrEnum):
+    """What doctor may claim about the agent's process.
+
+    ``STOPPED`` is claimed only when launchd answered and the agent has no process. When launchd could not be
+    asked, or its listing did not say, the status is ``UNKNOWN`` and nothing may be concluded from it.
+    """
+
+    RUNNING = "running"
+    STOPPED = "stopped"
+    UNKNOWN = "unknown"
+
+
+class Relation(StrEnum):
+    """How the process seen holding the port relates to the agent, when that can be told."""
+
+    AGENT = "agent"
+    OTHER = "other"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class AgentView:
-    """What the agent checks learned: their findings, launchd's state, and the environment the plist records."""
+    """What the agent checks learned: their findings, launchd's state, its environment, and what is known."""
 
     findings: list[Finding]
     state: ServiceState | None
     environment: dict[str, str] | None
+    status: AgentStatus
+
+    @property
+    def pid(self) -> int | None:
+        return None if self.state is None else self.state.pid
+
+
+def _status_of(state: ServiceState) -> AgentStatus:
+    """Judge a listing launchd gave: a pid is running, a stated state other than running is stopped, else unknown."""
+    if state.pid is not None:
+        return AgentStatus.RUNNING
+    if state.state not in (None, "running"):
+        return AgentStatus.STOPPED
+    return AgentStatus.UNKNOWN
+
+
+def _relation(holder: PortHolder | None, view: AgentView) -> Relation:
+    """Relate the process seen holding the port to the agent, only as far as the evidence goes.
+
+    Nobody seen is unknown, not another program: ``lsof`` shows only this account's processes. With the agent's
+    pid known the pids compare. With the agent known to have no process, whoever holds the port is another.
+    """
+    if holder is None:
+        return Relation.UNKNOWN
+    if view.pid is not None:
+        return Relation.AGENT if holder.pid == view.pid else Relation.OTHER
+    if view.status is AgentStatus.STOPPED:
+        return Relation.OTHER
+    return Relation.UNKNOWN
 
 
 def _agent_findings(paths: AgentPaths) -> AgentView:
@@ -508,24 +569,25 @@ def _agent_findings(paths: AgentPaths) -> AgentView:
                 fix="Check that `/bin/launchctl` runs in this terminal, then run `usagedash doctor` again.",
             )
         )
-        return AgentView(findings, None, installed)
+        return AgentView(findings, None, installed, AgentStatus.UNKNOWN)
     install_fix = "Run `usagedash agent install` from the repository directory."
     if state is None:
         if plist_untrusted:
-            return AgentView(findings, None, installed)
+            return AgentView(findings, None, installed, AgentStatus.STOPPED)
         if installed is None:
-            return AgentView([Finding(Level.FAIL, "The agent is not installed", fix=install_fix)], None, None)
+            not_installed = Finding(Level.FAIL, "The agent is not installed", fix=install_fix)
+            return AgentView([not_installed], None, None, AgentStatus.STOPPED)
         not_loaded = Finding(
             Level.FAIL,
             "The agent is installed but launchd has not loaded it",
             (f"property list: {paths.plist}",),
             install_fix,
         )
-        return AgentView([not_loaded], None, installed)
+        return AgentView([not_loaded], None, installed, AgentStatus.STOPPED)
     if installed is None and not plist_untrusted:
         findings.append(Finding(Level.WARN, "launchd lists an agent whose property list is gone", fix=install_fix))
     findings.append(_running_finding(state))
-    return AgentView(findings, state, installed)
+    return AgentView(findings, state, installed, _status_of(state))
 
 
 def _running_finding(state: ServiceState) -> Finding:
@@ -560,18 +622,35 @@ def _holder_detail(port: int, holder: PortHolder | None) -> tuple[str, ...]:
     return (f"Port {port} is held by {holder.command} (pid {holder.pid}).",)
 
 
-def _answer_findings(port: int, state: ServiceState | None) -> list[Finding]:
-    """Ask the dashboard's address whether it answers, and name whoever else holds the port when it does not."""
+def _answer_findings(port: int, view: AgentView) -> list[Finding]:
+    """Say whether the dashboard answers, and from what the agent, the port, and the answer allow, who is at fault.
+
+    Three inputs decide it: whether the agent has a process (``AgentStatus``), how the process seen holding the
+    port relates to it (``Relation``), and what the health request got. Each is claimed only as far as it is
+    known; an unknown input never counts as evidence for either side. The cases, for a request that got a 200:
+
+    * the agent has no process: something else serves it (failure);
+    * the agent's state is unknown: the answer cannot be attributed (warning);
+    * the agent runs and another process holds the port: failure; otherwise fine.
+
+    For a refusal: the agent running means it is still starting or cannot bind; anything else, nothing listens.
+    For a stall, a failure, or an answer that is not a 200: the agent holds the port, restart it; another
+    process does, or the agent has none, move the port; otherwise nobody can be blamed, so restart first and
+    say what to try after.
+    """
     health = probe_health(f"http://{LOOPBACK_HOST}:{port}{HEALTH_PATH}")
     holder = port_holder(port)
-    agent_pid = None if state is None else state.pid
+    relation = _relation(holder, view)
+    detail = _holder_detail(port, holder)
     if health.kind is HealthKind.ANSWERED and health.status == HTTP_OK:
-        if agent_pid is None:
+        if view.status is AgentStatus.STOPPED:
             return [_served_by_someone_else(port, holder, "the agent is not running, so something else is serving it")]
-        if holder is not None and holder.pid != agent_pid:
-            return [_served_by_someone_else(port, holder, f"the agent (pid {agent_pid}) is not the one holding it")]
+        if view.status is AgentStatus.UNKNOWN:
+            return [_answer_not_attributable(port, detail)]
+        if relation is Relation.OTHER:
+            return [_served_by_someone_else(port, holder, f"the agent (pid {view.pid}) is not the one holding it")]
         return [Finding(Level.OK, f"The dashboard answers on port {port}")]
-    if health.kind is HealthKind.REFUSED and agent_pid is not None:
+    if health.kind is HealthKind.REFUSED and view.status is AgentStatus.RUNNING:
         return [
             Finding(
                 Level.FAIL,
@@ -583,25 +662,30 @@ def _answer_findings(port: int, state: ServiceState | None) -> list[Finding]:
         ]
     if health.kind is HealthKind.REFUSED:
         return [
-            Finding(
-                Level.FAIL,
-                f"Nothing is listening on port {port}",
-                _holder_detail(port, holder),
-                "Fix the agent problem above first.",
-            )
+            Finding(Level.FAIL, f"Nothing is listening on port {port}", detail, "Fix the agent problem above first.")
         ]
-    if holder is not None and agent_pid is not None and holder.pid == agent_pid:
+    if relation is Relation.AGENT and view.pid is not None:
         return [
             Finding(
                 Level.FAIL,
-                _agent_trouble_title(agent_pid, port, health),
+                _agent_trouble_title(view.pid, port, health),
                 ("No other program is in the way, so a different port will not help.",),
                 "Restart it with `usagedash agent install`. If this comes back, read the log lines below.",
             )
         ]
-    if holder is None and agent_pid is not None:
-        return [_unattributed_trouble(port, health)]
-    return [Finding(Level.FAIL, _port_trouble_title(port, health), _holder_detail(port, holder), _move_fix(port))]
+    if relation is Relation.OTHER or view.status is AgentStatus.STOPPED:
+        return [Finding(Level.FAIL, _port_trouble_title(port, health), detail, _move_fix(port))]
+    return [_unattributed_trouble(port, health)]
+
+
+def _answer_not_attributable(port: int, detail: tuple[str, ...]) -> Finding:
+    """A healthy answer while launchd's state for the agent is unknown: neither fine nor someone else's."""
+    return Finding(
+        Level.WARN,
+        f"The dashboard answers on port {port}, but doctor could not tell whether the agent is serving it",
+        ("launchd's state for the agent could not be read.", *detail),
+        "Run `usagedash agent status`. If the agent is not running, run `usagedash agent install`.",
+    )
 
 
 def _unattributed_trouble(port: int, health: HealthResult) -> Finding:
@@ -681,7 +765,7 @@ def diagnose_agent(paths: AgentPaths, port: int | None) -> list[Finding]:
     view = _agent_findings(paths)
     findings = list(view.findings)
     if port is not None:
-        findings.extend(_answer_findings(port, view.state))
+        findings.extend(_answer_findings(port, view))
     findings.extend(log_findings(paths))
     return findings
 
@@ -692,10 +776,15 @@ def diagnose(paths: AgentPaths, *, shell: SettingsOutcome, served: SettingsOutco
     ``shell`` is the settings this shell loads; ``served`` is what the installed agent was installed with.
     ``served`` wins for the port, the data directory, and the vendor CLIs, because those are what is actually
     running: the agent starts the executables pinned in its property list, not the ones this shell would find.
+    This shell's settings stand in only when no agent is installed. When the installed settings cannot be
+    read, the port, data directory, and CLIs are not checked at all: checking this shell's would report on a
+    different installation while the agent already started may still be running.
     The PATH check stays with ``shell``: it asks what ``agent install`` would do if run from here.
     """
     findings = [*system_findings(), *settings_findings(shell, served)]
-    effective = served if isinstance(served, Settings) else shell if isinstance(shell, Settings) else None
+    effective = (
+        served if isinstance(served, Settings) else shell if served is None and isinstance(shell, Settings) else None
+    )
     view = _agent_findings(paths)
     if effective is not None:
         findings.extend(data_directory_findings(effective))
@@ -704,7 +793,7 @@ def diagnose(paths: AgentPaths, *, shell: SettingsOutcome, served: SettingsOutco
         findings.extend(path_findings(shell))
     findings.extend(view.findings)
     if effective is not None:
-        findings.extend(_answer_findings(effective.port, view.state))
+        findings.extend(_answer_findings(effective.port, view))
     if has_failure(findings):
         findings.extend(log_findings(paths))
     return findings

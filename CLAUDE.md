@@ -191,9 +191,27 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   for the report (`doctor._logging_silenced`). **A `FAIL` must name a next step** (`Finding.__post_init__`
   refuses one that does not), and a remedy must be one this package's own commands can carry out: an
   untrusted property list is cleared with `agent uninstall`, because `agent install` reads the same
-  property list through the same trust check and stops at the same error. The one thing it ever binds is a loopback port, briefly, to suggest a free one
-  (`doctor.suggest_port`), and only when a conflict is found. The remedy says to change `USAGEDASH_PORT`
-  when this shell sets it, because it outranks the config file. Output shows
+  property list through the same trust check and stops at the same error (when the file is unsafe, not
+  merely unreadable). Settings the installed agent recorded that no longer load are corrected and
+  installed again, not uninstalled: the remedy follows the error's type (`AgentError` or `ConfigError`),
+  never its text. When they cannot be read, the port, data directory, and CLIs are not checked at all,
+  because this shell's would describe another installation. Doctor applies the config-directory guard
+  `agent install` applies first (`cli._shell_settings_as_install_sees_them`), so "settings load" is not
+  claimed for a directory install would refuse.
+  **Attribution goes through two types, not ad hoc branches.** What doctor may claim about the agent's
+  process is `doctor.AgentStatus`: `RUNNING` needs a pid; `STOPPED` only when launchd answered and the
+  agent has no process; launchd unreachable, a listing that does not say, or a state of "running" with no
+  pid is `UNKNOWN`. How the process seen holding the port relates to it is `doctor.Relation`; nobody seen
+  is `UNKNOWN`, never "another program", because `lsof` shows only this account's processes and can fail.
+  An unknown never counts as evidence for either side. `TestNothingIsClaimedThatTheEvidenceDoesNotAllow`
+  runs every combination (7 agent states, 3 holders, 6 health results) against stated invariants. Seven
+  review rounds on branch-by-branch logic each found the next unknown input; the table and that test are
+  the close for the class, and a mutation of either rule fails it. A holder is a listener the loopback
+  address reaches (`127.0.0.1` or `*`, from `lsof -Fpcn`); one bound to another interface is not.
+  An answer that does not come from the agent is a `FAIL` even when it is healthy. The one thing doctor
+  ever binds is a loopback port, briefly, to suggest a free one (`doctor.suggest_port`), and only when a
+  conflict is found. The remedy says to change `USAGEDASH_PORT` when this shell sets it to a non-empty
+  value, because it outranks the config file. Output shows
   the home folder as `~` (`doctor.abbreviate_home`) because users paste it into issues. Logs are read
   without following a link, without blocking, only as a regular file this account owns
   (`doctor.tail_lines`), and control characters are replaced before printing. A new check goes in
@@ -204,8 +222,9 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   (`agent.parse_service_state`). Only fields indented by exactly one tab count, because the nested
   coalition blocks carry a `state` of their own. A field not stated or not understood is `None`, and
   `ServiceState.last_run_failed` is true only for a nonzero numeric exit or a signal. `agent status`
-  asks `agent.is_loaded` first and `agent.service_state` second, so a service that is not loaded costs one
-  call and stays one line, and "loaded" is never printed as "running" without a pid.
+  asks launchd once (`agent.service_state`): a second question (loaded, then its state) leaves a gap in
+  which a stopping service reads as loaded and not running. "Loaded" is never printed as "running"
+  without a pid, and a service that is not loaded stays one line.
 - **`agent uninstall` waits out `bootout`, then deletes the plist** (`agent.uninstall`). A stop that
   does not finish deletes nothing. `AgentStillLoadedError` means launchd still lists the service
   after the unload deadline, so it is left running. A failed stop whose outcome is unknown uses the
