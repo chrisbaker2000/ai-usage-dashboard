@@ -25,7 +25,7 @@ from pathlib import Path
 import httpx2
 
 from usagedash import agent
-from usagedash.agent import AgentPaths, ServiceState
+from usagedash.agent import AgentPaths, AgentStatus, ServiceState
 from usagedash.api import HEALTH_PATH
 from usagedash.config import LOOPBACK_HOST, MAX_PORT, MIN_PORT, PORT_ENV, Settings
 from usagedash.errors import ConfigError, UsageDashError
@@ -85,7 +85,8 @@ _RECOVER_THE_PROPERTY_LIST = (
 )
 
 _CORRECT_THE_SETTING = (
-    "Correct the setting the message names, in the config file or in a USAGEDASH_* variable, then run "
+    "Read the message. If it names a setting, correct it in the config file or in a USAGEDASH_* variable. If it "
+    "says a file or folder is unsafe, make that one writable by you alone (`chmod go-w <path>`). Then run "
     "`usagedash agent install`: it records the settings this shell loads in place of the ones that no longer load."
 )
 
@@ -485,18 +486,6 @@ def _move_fix(port: int) -> str:
     )
 
 
-class AgentStatus(StrEnum):
-    """What doctor may claim about the agent's process.
-
-    ``STOPPED`` is claimed only when launchd answered and the agent has no process. When launchd could not be
-    asked, or its listing did not say, the status is ``UNKNOWN`` and nothing may be concluded from it.
-    """
-
-    RUNNING = "running"
-    STOPPED = "stopped"
-    UNKNOWN = "unknown"
-
-
 class Relation(StrEnum):
     """How the process seen holding the port relates to the agent, when that can be told."""
 
@@ -517,15 +506,6 @@ class AgentView:
     @property
     def pid(self) -> int | None:
         return None if self.state is None else self.state.pid
-
-
-def _status_of(state: ServiceState) -> AgentStatus:
-    """Judge a listing launchd gave: a pid is running, a stated state other than running is stopped, else unknown."""
-    if state.pid is not None:
-        return AgentStatus.RUNNING
-    if state.state not in (None, "running"):
-        return AgentStatus.STOPPED
-    return AgentStatus.UNKNOWN
 
 
 def _relation(holder: PortHolder | None, view: AgentView) -> Relation:
@@ -587,7 +567,7 @@ def _agent_findings(paths: AgentPaths) -> AgentView:
     if installed is None and not plist_untrusted:
         findings.append(Finding(Level.WARN, "launchd lists an agent whose property list is gone", fix=install_fix))
     findings.append(_running_finding(state))
-    return AgentView(findings, state, installed, _status_of(state))
+    return AgentView(findings, state, installed, state.status)
 
 
 def _running_finding(state: ServiceState) -> Finding:
@@ -600,8 +580,10 @@ def _running_finding(state: ServiceState) -> Finding:
         )
         if fact is not None
     )
-    if state.pid is not None:
+    if state.status is AgentStatus.RUNNING:
         return Finding(Level.OK, f"launchd is running the agent (pid {state.pid})", facts)
+    if state.status is AgentStatus.UNKNOWN:
+        return Finding(Level.WARN, "launchd lists the agent, but its listing does not say whether it is running", facts)
     if state.last_run_failed:
         return Finding(
             Level.FAIL,
@@ -630,8 +612,9 @@ def _answer_findings(port: int, view: AgentView) -> list[Finding]:
     known; an unknown input never counts as evidence for either side. The cases, for a request that got a 200:
 
     * the agent has no process: something else serves it (failure);
-    * the agent's state is unknown: the answer cannot be attributed (warning);
-    * the agent runs and another process holds the port: failure; otherwise fine.
+    * the agent runs and another process holds the port: failure;
+    * the agent runs and the process holding the port is the agent: fine, and only this is fine;
+    * anything else, the agent's state unknown or the holder not seen: the answer cannot be attributed (warning).
 
     For a refusal: the agent running means it is still starting or cannot bind; anything else, nothing listens.
     For a stall, a failure, or an answer that is not a 200: the agent holds the port, restart it; another
@@ -645,11 +628,11 @@ def _answer_findings(port: int, view: AgentView) -> list[Finding]:
     if health.kind is HealthKind.ANSWERED and health.status == HTTP_OK:
         if view.status is AgentStatus.STOPPED:
             return [_served_by_someone_else(port, holder, "the agent is not running, so something else is serving it")]
-        if view.status is AgentStatus.UNKNOWN:
-            return [_answer_not_attributable(port, detail)]
         if relation is Relation.OTHER:
             return [_served_by_someone_else(port, holder, f"the agent (pid {view.pid}) is not the one holding it")]
-        return [Finding(Level.OK, f"The dashboard answers on port {port}")]
+        if relation is Relation.AGENT:
+            return [Finding(Level.OK, f"The dashboard answers on port {port}")]
+        return [_answer_not_attributable(port, view, detail)]
     if health.kind is HealthKind.REFUSED and view.status is AgentStatus.RUNNING:
         return [
             Finding(
@@ -678,13 +661,24 @@ def _answer_findings(port: int, view: AgentView) -> list[Finding]:
     return [_unattributed_trouble(port, health)]
 
 
-def _answer_not_attributable(port: int, detail: tuple[str, ...]) -> Finding:
-    """A healthy answer while launchd's state for the agent is unknown: neither fine nor someone else's."""
+def _answer_not_attributable(port: int, view: AgentView, detail: tuple[str, ...]) -> Finding:
+    """A healthy answer that cannot be tied to the agent: neither fine nor someone else's.
+
+    Either launchd's state for the agent is unknown, or the agent runs and nobody could be seen holding the
+    port. ``lsof`` shows only this account's processes and can fail, so an answer from a process doctor
+    cannot see is not evidence that the agent gave it.
+    """
+    if view.status is AgentStatus.UNKNOWN:
+        why = "launchd's state for the agent could not be read."
+        fix = "Run `usagedash agent status`. If the agent is not running, run `usagedash agent install`."
+    else:
+        why = "Doctor could not see which process holds the port."
+        fix = f"If this is unexpected, run `lsof -nP -iTCP:{port} -sTCP:LISTEN` yourself to see who holds it."
     return Finding(
         Level.WARN,
         f"The dashboard answers on port {port}, but doctor could not tell whether the agent is serving it",
-        ("launchd's state for the agent could not be read.", *detail),
-        "Run `usagedash agent status`. If the agent is not running, run `usagedash agent install`.",
+        (why, *detail),
+        fix,
     )
 
 
@@ -776,16 +770,22 @@ def diagnose(paths: AgentPaths, *, shell: SettingsOutcome, served: SettingsOutco
     ``shell`` is the settings this shell loads; ``served`` is what the installed agent was installed with.
     ``served`` wins for the port, the data directory, and the vendor CLIs, because those are what is actually
     running: the agent starts the executables pinned in its property list, not the ones this shell would find.
-    This shell's settings stand in only when no agent is installed. When the installed settings cannot be
-    read, the port, data directory, and CLIs are not checked at all: checking this shell's would report on a
-    different installation while the agent already started may still be running.
+    This shell's settings stand in only when nothing is installed at all: no property list, and nothing loaded
+    in launchd. When the installed settings cannot be read, or an agent is loaded without a property list to
+    read them from, the port, data directory, and CLIs are not checked: checking this shell's would report on
+    a different installation while the agent already started may still be running.
     The PATH check stays with ``shell``: it asks what ``agent install`` would do if run from here.
     """
     findings = [*system_findings(), *settings_findings(shell, served)]
-    effective = (
-        served if isinstance(served, Settings) else shell if served is None and isinstance(shell, Settings) else None
-    )
     view = _agent_findings(paths)
+    nothing_is_installed = served is None and view.state is None
+    effective = (
+        served
+        if isinstance(served, Settings)
+        else shell
+        if nothing_is_installed and isinstance(shell, Settings)
+        else None
+    )
     if effective is not None:
         findings.extend(data_directory_findings(effective))
         findings.extend(vendor_findings(effective, _agent_path(view.environment)))

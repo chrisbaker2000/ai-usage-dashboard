@@ -262,20 +262,50 @@ def _serve(settings: Settings) -> int:
     return EXIT_OK
 
 
-def _settings_the_installed_agent_serves() -> Settings | None:
-    """Overlay the installed plist's USAGEDASH settings on this shell, or return None when absent.
+def _environment_the_installed_agent_runs_with() -> tuple[dict[str, str], Path | None] | None:
+    """Overlay the installed plist's USAGEDASH settings on this shell's other variables, or None when absent.
+
+    Returns the environment and the home the agent recorded, which is what ``load_settings`` takes.
 
     Raises:
         AgentError: if a property list is present and cannot be read.
-        ConfigError: if the settings it names are not valid.
     """
     installed = agent.installed_environment(agent.agent_paths())
     if installed is None:
         return None
     shell = {name: value for name, value in os.environ.items() if not name.startswith(SETTINGS_ENV_PREFIX)}
     recorded_home = installed.get("HOME")
-    home = Path(recorded_home) if recorded_home is not None else None
-    return load_settings({**shell, **installed}, home=home)
+    return {**shell, **installed}, Path(recorded_home) if recorded_home is not None else None
+
+
+def _settings_the_installed_agent_serves() -> Settings | None:
+    """Load the settings the installed plist records, or return None when there is no property list.
+
+    Raises:
+        AgentError: if a property list is present and cannot be read.
+        ConfigError: if the settings it names are not valid.
+    """
+    served = _environment_the_installed_agent_runs_with()
+    return None if served is None else load_settings(served[0], home=served[1])
+
+
+def _installed_settings_as_serve_sees_them() -> Settings | None:
+    """Load the installed agent's settings after the guard ``serve`` applies to its own config directory.
+
+    The agent's config file can be somewhere else than this shell's: its plist may name one. ``serve`` refuses
+    to start when that directory could be replaced by another account, so a diagnosis that loads the settings
+    without the guard would call them fine and miss why the agent does not start.
+
+    Raises:
+        AgentError: if a property list is present and cannot be read.
+        ConfigError: if that config directory is unsafe or the settings it names are not valid.
+    """
+    served = _environment_the_installed_agent_runs_with()
+    if served is None:
+        return None
+    environment, home = served
+    standing._refuse_replaceable_config_directory(config_file(environment, home))
+    return load_settings(environment, home=home)
 
 
 def _same_dashboard(installed: Settings, invoked: Settings) -> bool:
@@ -478,17 +508,23 @@ def _agent_has_stopped(paths: agent.AgentPaths) -> bool:
         state = agent.service_state(paths)
     except UsageDashError:
         return False
-    return state is not None and state.pid is None and state.last_run_failed
+    return state is not None and state.status is agent.AgentStatus.STOPPED and state.last_run_failed
 
 
 def _status_lines(paths: agent.AgentPaths, state: agent.ServiceState) -> list[str]:
-    """Describe a loaded agent from launchd's own fields; loaded does not mean running."""
-    if state.pid is not None:
+    """Describe a loaded agent from launchd's own fields; loaded does not mean running.
+
+    "Not running" is said only when the listing states a state other than running. A listing that says
+    nothing, or says running without a process id, is reported as not saying (``AgentStatus.UNKNOWN``).
+    """
+    if state.status is agent.AgentStatus.RUNNING:
         headline = f"{paths.label}: running (pid {state.pid})"
+    elif state.status is agent.AgentStatus.UNKNOWN:
+        headline = f"{paths.label}: loaded; launchd's listing does not say whether it is running"
     elif state.last_run_failed:
         headline = f"{paths.label}: loaded, not running; the last run ended with {state.last_exit_description}"
     else:
-        headline = f"{paths.label}: loaded, not running ({state.state or 'state not stated'})"
+        headline = f"{paths.label}: loaded, not running ({state.state})"
     lines = [headline]
     if state.runs is not None:
         lines.append(f"  runs: {state.runs}")
@@ -548,7 +584,7 @@ def _doctor() -> int:
     findings = doctor.diagnose(
         paths,
         shell=_settings_outcome(_shell_settings_as_install_sees_them),
-        served=_settings_outcome(_settings_the_installed_agent_serves),
+        served=_settings_outcome(_installed_settings_as_serve_sees_them),
     )
     print(doctor.render(findings, agent.account_home()))
     return EXIT_FAILURE if doctor.has_failure(findings) else EXIT_OK

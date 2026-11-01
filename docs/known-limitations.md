@@ -113,8 +113,11 @@ not running at all and something else answers.
   made owner-only on that read; a file another account can write is refused and left as it is. So a
   `doctor` run does not preserve a mode of 0644 for diagnosis.
 - **The port holder is only what this account can see.** `doctor` asks `lsof`, which lists only this
-  account's processes without administrator rights. A holder it names is real; an absent holder is not
-  proof the port is free. The probe of `/healthz` is what says whether anything answers.
+  account's processes without administrator rights, and counts only a listener that a connection to
+  `127.0.0.1` reaches. A holder it names is real; an absent holder is not proof the port is free, and it
+  is never taken for another program. With the agent running and no holder visible, a healthy answer is a
+  warning that doctor could not tell whether the agent gave it, not an all-clear. The probe of `/healthz`
+  is what says whether anything answers.
 - **launchd's state comes from `launchctl print`**, which Apple does not document as an interface. A
   field the parser does not find is reported as not stated, and a run is called a failure only for a
   nonzero numeric exit or a signal. A launchd release that renames a field makes `agent status` and the

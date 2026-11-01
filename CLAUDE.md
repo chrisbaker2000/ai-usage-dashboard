@@ -199,11 +199,17 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   `agent install` applies first (`cli._shell_settings_as_install_sees_them`), so "settings load" is not
   claimed for a directory install would refuse.
   **Attribution goes through two types, not ad hoc branches.** What doctor may claim about the agent's
-  process is `doctor.AgentStatus`: `RUNNING` needs a pid; `STOPPED` only when launchd answered and the
-  agent has no process; launchd unreachable, a listing that does not say, or a state of "running" with no
-  pid is `UNKNOWN`. How the process seen holding the port relates to it is `doctor.Relation`; nobody seen
-  is `UNKNOWN`, never "another program", because `lsof` shows only this account's processes and can fail.
-  An unknown never counts as evidence for either side. `TestNothingIsClaimedThatTheEvidenceDoesNotAllow`
+  process is `agent.AgentStatus`, decided in one place, `ServiceState.status`, which `agent status`, the
+  install wait, and doctor all follow: `RUNNING` needs a pid; `STOPPED` only when launchd stated a state
+  other than running and named no process; launchd unreachable, a listing that does not say, or a state of
+  "running" with no readable pid is `UNKNOWN`, and no message may say "not running" for it. How the process
+  seen holding the port relates to it is `doctor.Relation`; nobody seen is `UNKNOWN`, never "another
+  program", because `lsof` shows only this account's processes and can fail. An unknown never counts as
+  evidence for either side, so a healthy answer is `OK` only when the holder is positively the agent: a
+  running agent with a holder nobody could see is a warning. This shell's settings stand in for the agent's
+  only when nothing is installed at all (no property list and nothing loaded); an agent loaded without its
+  property list is not diagnosed with this shell's port. The installed agent's settings are loaded through
+  the guard `serve` applies to its own config directory (`cli._installed_settings_as_serve_sees_them`). `TestNothingIsClaimedThatTheEvidenceDoesNotAllow`
   runs every combination (7 agent states, 3 holders, 6 health results) against stated invariants. Seven
   review rounds on branch-by-branch logic each found the next unknown input; the table and that test are
   the close for the class, and a mutation of either rule fails it. A holder is a listener the loopback

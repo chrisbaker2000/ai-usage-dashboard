@@ -14,6 +14,7 @@ import sys
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from xml.parsers.expat import ExpatError
 
@@ -338,6 +339,19 @@ def is_loaded(paths: AgentPaths) -> bool:
     return _print_service(paths) is not None
 
 
+class AgentStatus(StrEnum):
+    """What a listing of the agent allows anyone to claim about its process.
+
+    ``STOPPED`` is claimed only when launchd stated a state other than running and named no process. A
+    listing that says nothing, or says running without a process id this parser could read, is ``UNKNOWN``:
+    it is neither evidence that the agent runs nor that it does not.
+    """
+
+    RUNNING = "running"
+    STOPPED = "stopped"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class ServiceState:
     """What launchd says about the loaded agent. A field launchd did not state, or stated in a form this
@@ -349,6 +363,15 @@ class ServiceState:
     runs: int | None
     last_exit: str | None
     last_signal: str | None
+
+    @property
+    def status(self) -> AgentStatus:
+        """The one place that turns a listing into a claim about the process; every message follows it."""
+        if self.pid is not None:
+            return AgentStatus.RUNNING
+        if self.state not in (None, "running"):
+            return AgentStatus.STOPPED
+        return AgentStatus.UNKNOWN
 
     @property
     def last_run_failed(self) -> bool:

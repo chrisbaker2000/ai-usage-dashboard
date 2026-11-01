@@ -221,6 +221,16 @@ class Machine:
     holder: PortHolder | None = None
     probed: list[str] = field(default_factory=list)
 
+    def nothing_installed(self) -> None:
+        """No property list, nothing loaded in launchd, nobody on the port."""
+        self.environment, self.state, self.holder = None, None, None
+
+    def running(self) -> None:
+        """An agent installed with a property list, running as pid 838, and the process holding the port."""
+        self.environment = {"USAGEDASH_PORT": str(PORT)}
+        self.state = RUNNING
+        self.holder = PortHolder(838, "python3.13")
+
 
 @pytest.fixture
 def machine(monkeypatch: pytest.MonkeyPatch) -> Machine:
@@ -270,6 +280,11 @@ def only(findings: list[Finding], containing: str) -> Finding:
     matches = [finding for finding in findings if containing in finding.title]
     assert len(matches) == 1, titles(findings)
     return matches[0]
+
+
+def agents_config_file(home: Path) -> Path:
+    """Where the installed agent's config file is when its plist records none: the default under the home."""
+    return home / "Library" / "Application Support" / "ai-usage-dashboard" / "config.toml"
 
 
 def executable_file(path: Path, mode: int = 0o755) -> Path:
@@ -349,12 +364,37 @@ class TestTheAgentChecks:
             "The agent started and stopped (signal Killed: 9)"
         )
 
-    def test_a_listed_agent_that_is_not_running_and_has_not_failed_is_a_warning(
+    def test_a_listed_agent_that_launchd_says_is_not_running_and_has_not_failed_is_a_warning(
         self, paths: agent.AgentPaths, machine: Machine
     ) -> None:
-        machine.state = agent.ServiceState(None, None, None, None, None)
+        machine.state = agent.ServiceState("waiting", None, 1, "(never exited)", None)
 
-        assert only(doctor.diagnose_agent(paths, None), "not running it").level is Level.WARN
+        finding = only(doctor.diagnose_agent(paths, None), "is not running it")
+
+        assert finding.level is Level.WARN
+        assert finding.title == "launchd lists the agent but is not running it"
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            agent.ServiceState(None, None, None, None, None),
+            agent.ServiceState("running", None, 1, "(never exited)", None),
+            agent.ServiceState("running", None, 3, "1", None),
+        ],
+        ids=["nothing stated", "says running without a pid", "says running, last run failed"],
+    )
+    def test_a_listing_that_does_not_say_whether_the_agent_runs_is_not_called_not_running(
+        self, paths: agent.AgentPaths, machine: Machine, state: agent.ServiceState
+    ) -> None:
+        machine.state = state
+
+        findings = doctor.diagnose_agent(paths, None)
+
+        finding = only(findings, "does not say whether it is running")
+        assert finding.level is Level.WARN
+        assert finding.title == "launchd lists the agent, but its listing does not say whether it is running"
+        assert "is not running it" not in " ".join(titles(findings))
+        assert "started and stopped" not in " ".join(titles(findings))
 
     def test_a_property_list_that_cannot_be_trusted_is_a_failure(
         self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
@@ -564,12 +604,16 @@ class TestNothingIsClaimedThatTheEvidenceDoesNotAllow:
             or "something else is serving it" in title
         ) <= (stopped or other_holds)
         assert title.startswith("The agent (pid") <= agent_holds
-        assert ("could not tell whether the agent is serving it" in title) == (healthy and unknown)
-        assert (answer.level is Level.OK) <= (healthy and running and not other_holds)
+        holder_unseen = holder is None
+        assert ("could not tell whether the agent is serving it" in title) == (
+            healthy and (unknown or (running and holder_unseen))
+        )
+        assert (answer.level is Level.OK) <= (healthy and agent_holds)
         if healthy and stopped:
             assert answer.level is Level.FAIL
         if healthy and running:
-            assert answer.level is (Level.FAIL if other_holds else Level.OK)
+            expected = Level.FAIL if other_holds else Level.OK if agent_holds else Level.WARN
+            assert answer.level is expected
         if not healthy and health.kind is not HealthKind.REFUSED and agent_holds:
             assert "Restart it with `usagedash agent install`" in (answer.fix or "")
             assert "move the dashboard" not in (answer.fix or "")
@@ -966,7 +1010,10 @@ class TestWhetherTheDashboardAnswers:
 
 class TestTheFullDiagnosis:
     @pytest.fixture(autouse=True)
-    def a_quiet_machine(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def a_quiet_machine(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, machine: Machine) -> None:
+        # Why nothing installed by default: `served=None` means there is no property list, and this shell's
+        # settings stand in only then. A test about a running agent says so with `machine.running()`.
+        machine.nothing_installed()
         monkeypatch.setattr(agent, "agent_path_omissions", lambda _executables: [])
         monkeypatch.setattr(doctor, "checked_executable", lambda executable, _purpose: str(executable))
         # Why: a bare CLI name is looked up on the agent's PATH, which falls back to this shell's when no
@@ -976,6 +1023,7 @@ class TestTheFullDiagnosis:
     def test_a_healthy_installation_has_no_warning_no_failure_and_no_log_section(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
     ) -> None:
+        machine.running()
         settings = settings_for(tmp_path)
         write_log(paths.server_log, "2026-11-01 INFO usagedash.api: collected\n")
 
@@ -988,6 +1036,7 @@ class TestTheFullDiagnosis:
     def test_a_warning_alone_does_not_add_the_log_lines_to_the_report(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
     ) -> None:
+        machine.running()
         machine.environment = None
         write_log(paths.server_log, "2026-11-01 INFO usagedash.api: collected\n")
 
@@ -1060,6 +1109,8 @@ class TestTheFullDiagnosis:
     def test_installed_settings_that_cannot_be_read_are_not_replaced_by_this_shells_in_the_checks_that_follow(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
     ) -> None:
+        machine.running()
+
         findings = doctor.diagnose(
             paths, shell=settings_for(tmp_path, 9123), served=ConfigError("port must be an integer, got 'x'")
         )
@@ -1074,6 +1125,19 @@ class TestTheFullDiagnosis:
             if title.startswith(("The dashboard answers", "Nothing is listening", "Port 9123", "The request to port"))
         ]
         assert "launchd is running the agent (pid 838)" in titles(findings)
+
+    def test_a_loaded_agent_with_no_property_list_is_not_diagnosed_with_this_shells_settings(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        machine.running()
+        machine.environment = None
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path, 9123), served=None)
+
+        assert machine.probed == []
+        assert only(findings, "property list is gone").level is Level.WARN
+        assert not [title for title in titles(findings) if "data directory" in title]
+        assert not [title for title in titles(findings) if title.startswith(("claude:", "codex:", "grok:"))]
 
     def test_this_shells_settings_stand_in_only_when_no_agent_is_installed(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
@@ -1813,6 +1877,7 @@ class TestTheDoctorCommand:
         self, home: Path, machine: Machine, capsys: pytest.CaptureFixture[str]
     ) -> None:
         machine.environment = {}
+        machine.holder = PortHolder(838, "python3.13")
 
         assert cli.main(["doctor"]) == cli.EXIT_OK
 
@@ -1835,12 +1900,10 @@ class TestTheDoctorCommand:
 
         assert cli.main(["doctor"]) == cli.EXIT_FAILURE
 
-        output = capsys.readouterr().out
-        assert guarded == [home / "data" / "config.toml"]
-        assert (
-            f"[FAIL] The settings cannot be loaded: cannot use {home / 'data'}: another account could replace it"
-            in (output.replace("~", str(home)))
-        )
+        output = capsys.readouterr().out.replace("~", str(home))
+        assert guarded == [home / "data" / "config.toml", agents_config_file(home)]
+        assert f"[FAIL] The settings cannot be loaded: cannot use {home / 'data'}: another account" in output
+        assert "[FAIL] The installed agent's settings cannot be read: cannot use" in output
         assert "Settings load:" not in output
 
     def test_a_config_directory_that_passes_the_guard_loads_the_settings(
@@ -1852,8 +1915,30 @@ class TestTheDoctorCommand:
 
         cli.main(["doctor"])
 
-        assert guarded == [home / "data" / "config.toml"]
+        assert guarded == [home / "data" / "config.toml", agents_config_file(home)]
         assert "[ok  ] Settings load:" in capsys.readouterr().out
+
+    def test_the_installed_agents_config_directory_is_guarded_as_serve_guards_it(
+        self, home: Path, machine: Machine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        machine.environment = {}
+        machine.holder = PortHolder(838, "python3.13")
+        agents_config = agents_config_file(home)
+
+        def refuse_only_the_agents(config_file: Path) -> None:
+            if config_file == agents_config:
+                raise ConfigError(f"cannot use {config_file.parent}: its permissions (0777) let other accounts write")
+
+        monkeypatch.setattr(cli.standing, "_refuse_replaceable_config_directory", refuse_only_the_agents)
+
+        assert cli.main(["doctor"]) == cli.EXIT_FAILURE
+
+        output = capsys.readouterr().out
+        assert "[ok  ] Settings load:" in output
+        assert "[FAIL] The installed agent's settings cannot be read: cannot use" in output
+        assert "its permissions (0777) let other accounts write" in output
+        assert doctor._CORRECT_THE_SETTING in output
+        assert machine.probed == []
 
     def test_a_config_file_other_accounts_can_read_is_made_owner_only_as_every_command_does(
         self, home: Path, machine: Machine
@@ -2030,6 +2115,19 @@ class TestWaitingForTheNewAgent:
 
         assert self.wait(paths, clock) is True
 
+    def test_a_listing_that_does_not_say_whether_the_agent_runs_does_not_end_the_wait_even_after_a_failed_run(
+        self,
+        paths: agent.AgentPaths,
+        machine: Machine,
+        clock: "TestWaitingForTheNewAgent.Clock",
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        machine.state = agent.ServiceState("running", None, 2, "1", None)
+        self.answers(monkeypatch, False, True)
+
+        assert self.wait(paths, clock) is True
+        assert clock.sleeps == [cli.INSTALL_READY_POLL_SECONDS]
+
     def test_launchd_that_cannot_be_asked_does_not_end_the_wait(
         self,
         paths: agent.AgentPaths,
@@ -2188,11 +2286,28 @@ class TestAgentStatus:
 
         assert capsys.readouterr().out.splitlines()[0] == f"{label}: loaded, not running (waiting)"
 
-    def test_a_loaded_agent_whose_listing_states_nothing_is_not_called_running(
-        self, home: Path, label: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    @pytest.mark.parametrize(
+        "state",
+        [
+            agent.ServiceState(None, None, None, None, None),
+            agent.ServiceState("running", None, 2, "(never exited)", None),
+            agent.ServiceState("running", None, 2, "1", None),
+        ],
+        ids=["nothing stated", "says running without a pid", "says running, last run failed"],
+    )
+    def test_a_loaded_agent_whose_listing_does_not_say_is_neither_called_running_nor_not_running(
+        self,
+        home: Path,
+        label: str,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        state: agent.ServiceState,
     ) -> None:
-        monkeypatch.setattr(agent, "service_state", lambda _paths: agent.ServiceState(None, None, None, None, None))
+        monkeypatch.setattr(agent, "service_state", lambda _paths: state)
 
         cli.main(["agent", "status"])
 
-        assert capsys.readouterr().out.splitlines()[0] == f"{label}: loaded, not running (state not stated)"
+        first = capsys.readouterr().out.splitlines()[0]
+        assert first == f"{label}: loaded; launchd's listing does not say whether it is running"
+        assert "not running" not in first
+        assert "running (pid" not in first
