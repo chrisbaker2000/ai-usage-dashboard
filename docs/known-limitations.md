@@ -121,6 +121,19 @@ not running at all and something else answers.
   not tighten the folder; `usagedash agent install` does, as every start of the server does. It also fails
   when this account cannot write to the folder, since the database and its journal live there; a folder
   this account cannot even open is reported as one that cannot be examined.
+- **`doctor` does not foresee every step `agent install` takes.** `agent install` validates all of these before
+  it stops or replaces the running agent: the interpreter, the log directory and its ancestors, the launchd
+  capture files (a symbolic link there is refused), the property-list directory and its ancestors, the
+  required helper, and the installation lock. When one refuses, the install fails at once with one line that
+  names the step and the path, so a failed install has its own diagnosis and a running older agent is left
+  as it was.
+  `doctor` is for what the install cannot say: an install that succeeded and does not answer, and what a
+  running agent depends on while it runs. That is why it checks the data directory (the database's journal
+  lives there for as long as the agent runs), the command line tools as the collector resolves them, and
+  the helper the collector prepares, and why it does not check the log directory, the capture files, or the
+  property-list directory beforehand: a symlinked capture log or an unsafe `~/Library/LaunchAgents` stops the
+  next `agent install` and nothing that is already running. A report can therefore end "working" while a
+  reinstall would be refused; the refusal is printed by the reinstall, not by `doctor`.
 - **The port holder is only what this account can see.** `doctor` asks `lsof`, which lists only this
   account's processes without administrator rights, and counts only a listener that a connection to
   `127.0.0.1` reaches. A holder it names is real; an absent holder is not proof the port is free, and it

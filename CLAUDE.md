@@ -288,7 +288,14 @@ ValidError` passing it, because a type name cannot be told from a value by its s
   the new digest. What the prompts deliberately do not defend against (a hostile process that can already
   write to this account's checkout: local Git hooks, the ignored `.venv`) is a recorded non-goal in
   `docs/known-limitations.md`, not a missing check; do not add hook or `.venv` verification to them
-  without widening the threat model there first.
+  without widening the threat model there first. `doctor` deliberately does not preflight the install-only
+  prerequisites (the log directory, the launchd capture files, the property-list directory): install
+  validates them before it stops the running agent and says which one refused; `doctor` covers what a
+  running agent depends on and what an install leaves behind (record in `docs/known-limitations.md`).
+  `agent.parse_service_state` judges each value whole and never cuts it first (a text field over
+  `MAX_SERVICE_FIELD_LENGTH` is None; a number over `MAX_NUMBER_DIGITS` digits is None, which also keeps
+  `int` from raising); a process id must be positive, and a `pid` line that is not one makes the status
+  `UNKNOWN` (`ServiceState.pid_unreadable`), never `STOPPED`, because launchd did name a process.
   An answer that does not come from the agent is a `FAIL` even when it is healthy. The one thing doctor
   ever binds is a loopback port, briefly, to suggest a free one (`doctor.suggest_port`), and only when a
   conflict is found. The remedy says to change `USAGEDASH_PORT` when this shell sets it to a non-empty

@@ -92,10 +92,61 @@ class TestParsingWhatLaunchdSays:
 
     @pytest.mark.parametrize(
         ("text", "expected"),
-        [("838", 838), ("0", 0), ("-5", -5), ("", None), ("-", None), ("12abc", None), ("١٢", None), ("1.5", None)],
+        [
+            ("838", 838),
+            ("1", 1),
+            ("999999999999999999", 999999999999999999),
+            ("0", None),
+            ("-5", None),
+            ("-1", None),
+            ("", None),
+            ("-", None),
+            ("12abc", None),
+            ("١٢", None),
+            ("1.5", None),
+            ("+5", None),
+            ("1" * 19, None),
+            ("1" * 80 + "x", None),
+            ("1" * 5000, None),
+        ],
     )
-    def test_a_number_is_read_only_when_it_is_plainly_one(self, text: str, expected: int | None) -> None:
+    def test_a_process_id_is_read_only_when_it_is_plainly_a_positive_number(
+        self, text: str, expected: int | None
+    ) -> None:
         assert agent.parse_service_state(f"{TAB}pid = {text}\n").pid == expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [("0", 0), ("4", 4), ("-1", None), ("x", None), ("", None), ("1" * 19, None), ("1" * 80 + "x", None)],
+    )
+    def test_a_run_count_is_read_only_when_it_is_plainly_a_number_of_zero_or_more(
+        self, text: str, expected: int | None
+    ) -> None:
+        assert agent.parse_service_state(f"{TAB}runs = {text}\n").runs == expected
+
+    @pytest.mark.parametrize("text", ["0", "-5", "1" * 19, "1" * 80 + "x", "1" * 5000, "abc", "", "-"])
+    def test_a_pid_line_that_is_not_a_process_id_leaves_the_process_unknown_whatever_the_state_says(
+        self, text: str
+    ) -> None:
+        for state in ("running", "spawn scheduled", "waiting"):
+            parsed = agent.parse_service_state(f"{TAB}state = {state}\n{TAB}pid = {text}\n")
+
+            assert parsed.pid is None
+            assert parsed.pid_unreadable is True
+            assert parsed.status is agent.AgentStatus.UNKNOWN
+
+    def test_no_pid_line_with_a_state_other_than_running_is_still_a_stopped_agent(self) -> None:
+        parsed = agent.parse_service_state(f"{TAB}state = waiting\n")
+
+        assert parsed.pid_unreadable is False
+        assert parsed.status is agent.AgentStatus.STOPPED
+
+    def test_a_readable_pid_is_a_running_agent_and_not_unreadable(self) -> None:
+        parsed = agent.parse_service_state(f"{TAB}state = running\n{TAB}pid = 838\n")
+
+        assert parsed.pid == 838
+        assert parsed.pid_unreadable is False
+        assert parsed.status is agent.AgentStatus.RUNNING
 
     @pytest.mark.parametrize(
         ("last_exit", "signal", "described"),
@@ -112,10 +163,28 @@ class TestParsingWhatLaunchdSays:
     ) -> None:
         assert agent.ServiceState(None, None, None, last_exit, signal).last_exit_description == described
 
-    def test_a_field_longer_than_the_limit_is_cut(self) -> None:
-        parsed = agent.parse_service_state(f"{TAB}state = {'x' * 500}\n")
+    def test_a_text_field_longer_than_the_limit_is_not_understood_and_is_never_cut_into_one_that_is(self) -> None:
+        limit = agent.MAX_SERVICE_FIELD_LENGTH
 
-        assert parsed.state == "x" * agent.MAX_SERVICE_FIELD_LENGTH
+        assert agent.parse_service_state(f"{TAB}state = {'x' * limit}\n").state == "x" * limit
+        assert agent.parse_service_state(f"{TAB}state = {'x' * (limit + 1)}\n").state is None
+        assert agent.parse_service_state(f"{TAB}state = {'x' * 500}\n").state is None
+
+    def test_a_last_exit_and_a_last_signal_longer_than_the_limit_are_not_understood_either(self) -> None:
+        limit = agent.MAX_SERVICE_FIELD_LENGTH
+        listing = f"{TAB}last exit code = {'1' * (limit + 1)}\n{TAB}last terminating signal = {'x' * (limit + 1)}\n"
+
+        parsed = agent.parse_service_state(listing)
+
+        assert parsed.last_exit is None
+        assert parsed.last_signal is None
+        assert parsed.last_run_failed is False
+
+    def test_a_value_is_judged_whole_so_eighty_digits_and_a_letter_are_not_a_number(self) -> None:
+        limit = agent.MAX_SERVICE_FIELD_LENGTH
+        parsed = agent.parse_service_state(f"{TAB}pid = {'1' * limit}x\n{TAB}runs = {'2' * limit}x\n")
+
+        assert (parsed.pid, parsed.runs) == (None, None)
 
     @pytest.mark.parametrize(
         ("last_exit", "signal", "failed"),

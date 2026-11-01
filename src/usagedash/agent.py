@@ -376,12 +376,17 @@ class ServiceState:
     runs: int | None
     last_exit: str | None
     last_signal: str | None
+    pid_unreadable: bool = False
+    """The listing has a ``pid`` line this parser could not read as a process id (``pid = 0``, a negative or
+    overlong number, text). A process may exist, so the agent is not claimed to be stopped."""
 
     @property
     def status(self) -> AgentStatus:
         """The one place that turns a listing into a claim about the process; every message follows it."""
         if self.pid is not None:
             return AgentStatus.RUNNING
+        if self.pid_unreadable:
+            return AgentStatus.UNKNOWN
         if self.state not in (None, "running"):
             return AgentStatus.STOPPED
         return AgentStatus.UNKNOWN
@@ -414,6 +419,9 @@ _SERVICE_FIELD = re.compile(
     re.MULTILINE,
 )
 MAX_SERVICE_FIELD_LENGTH = 80
+MAX_NUMBER_DIGITS = 18
+"""The most digits a field is read as a number from: enough for any process id, run count, or exit status, and
+far below the length at which ``int`` raises ``ValueError``."""
 
 
 def parse_service_state(listing: str) -> ServiceState:
@@ -421,17 +429,38 @@ def parse_service_state(listing: str) -> ServiceState:
 
     Only fields indented by exactly one tab count: nested blocks such as the coalitions carry a ``state``
     of their own, and the first top-level occurrence of a name wins.
+
+    A value is judged whole, never cut first: cut to ``MAX_SERVICE_FIELD_LENGTH`` before it is read, eighty
+    digits and a letter would be a number. A text field longer than that is not understood, so it is None, and
+    a ``pid`` line that is not a positive number leaves the process unknown and not absent.
     """
     fields: dict[str, str] = {}
     for match in _SERVICE_FIELD.finditer(listing):
-        fields.setdefault(match.group(1), match.group(2).strip()[:MAX_SERVICE_FIELD_LENGTH])
+        fields.setdefault(match.group(1), match.group(2).strip())
+    stated_pid = fields.get("pid")
+    pid = _process_id(stated_pid)
     return ServiceState(
-        state=fields.get("state"),
-        pid=_whole_number(fields.get("pid")),
-        runs=_whole_number(fields.get("runs")),
-        last_exit=fields.get("last exit code"),
-        last_signal=fields.get("last terminating signal"),
+        state=_shown(fields.get("state")),
+        pid=pid,
+        runs=_count(fields.get("runs")),
+        last_exit=_shown(fields.get("last exit code")),
+        last_signal=_shown(fields.get("last terminating signal")),
+        pid_unreadable=stated_pid is not None and pid is None,
     )
+
+
+def _shown(text: str | None) -> str | None:
+    return None if text is None or len(text) > MAX_SERVICE_FIELD_LENGTH else text
+
+
+def _process_id(text: str | None) -> int | None:
+    number = _whole_number(text)
+    return number if number is not None and number > 0 else None
+
+
+def _count(text: str | None) -> int | None:
+    number = _whole_number(text)
+    return number if number is not None and number >= 0 else None
 
 
 def _whole_number(text: str | None) -> int | None:
@@ -440,7 +469,7 @@ def _whole_number(text: str | None) -> int | None:
     stripped = text.strip()
     negative = stripped.startswith("-")
     digits = stripped[1:] if negative else stripped
-    if not digits.isascii() or not digits.isdecimal():
+    if not digits.isascii() or not digits.isdecimal() or len(digits) > MAX_NUMBER_DIGITS:
         return None
     return -int(digits) if negative else int(digits)
 
