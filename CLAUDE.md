@@ -222,7 +222,12 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   the name's shape is parsed (the name may be followed by up to 64 characters before its separator, so
   `password[0]=` and `DB_PASSWORD=` both match): three review rounds in a row found a syntax the previous
   patch missed (a scheme plus a credential, an escaped quote, an index on the name). The whole rendered
-  report is screened, not only the log lines it quotes, because it also echoes settings values and paths. `test_no_value_syntax_lets_a_secret_survive_the_screen_after_a_credential_name`
+  report is screened, not only the log lines it quotes, because it also echoes settings values and paths.
+  Every finding field is also made one printable line when the report is formatted (`doctor._single_line`):
+  a path or message this package did not write can carry a newline, which would add a line of the report
+  that nothing produced (a forged `Result:` verdict), or an escape byte that drives the terminal. The install
+  wait checks its deadline before every probe (`cli._wait_until_answering`), so no probe starts at or after
+  it; a step already running is not cut short, which is why the docs say "about 20 seconds". `test_no_value_syntax_lets_a_secret_survive_the_screen_after_a_credential_name`
   is the list a change must keep passing; add the next syntax there, not a new branch in the regex. `TestNothingIsClaimedThatTheEvidenceDoesNotAllow`
   runs every combination (7 agent states, 3 holders, 6 health results) against stated invariants. Seven
   review rounds on branch-by-branch logic each found the next unknown input; the table and that test are

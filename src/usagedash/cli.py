@@ -493,21 +493,19 @@ def _wait_until_answering(
     ended in failure ends the wait early: launchd waits ``RESTART_THROTTLE_SECONDS`` before the next try,
     so waiting longer would only delay the report.
 
-    The deadline is checked after every step that can take time, so no probe starts after it. A step that is
-    already running is not cut short: one health request takes up to ``LIVENESS_TIMEOUT_SECONDS`` and a
-    launchd question can take up to its own limit, so the wait is "about" the deadline, not exactly it.
+    The deadline is checked before every probe and again after the launchd question, so no probe starts at or
+    after it and no sleep follows a deadline that a slow step crossed. A step already running is not cut short:
+    one health request takes up to ``LIVENESS_TIMEOUT_SECONDS`` and a launchd question can take up to its own
+    limit, so the wait is "about" the deadline, not exactly it.
     """
     deadline = monotonic() + INSTALL_READY_WAIT_SECONDS
-    while True:
+    while monotonic() < deadline:
         if _dashboard_is_listening(dashboard_url):
             return True
-        if monotonic() >= deadline:
-            return False
-        if _agent_has_stopped(paths):
-            return False
-        if monotonic() >= deadline:
+        if _agent_has_stopped(paths) or monotonic() >= deadline:
             return False
         sleep(INSTALL_READY_POLL_SECONDS)
+    return False
 
 
 def _agent_has_stopped(paths: agent.AgentPaths) -> bool:

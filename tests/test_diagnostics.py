@@ -1885,6 +1885,49 @@ class TestReadingALog:
 
         assert doctor.screen_for_sharing(line) == line
 
+    @pytest.mark.parametrize("field", ["title", "detail", "fix"])
+    def test_a_newline_in_a_field_cannot_add_a_line_to_the_report_such_as_a_forged_verdict(
+        self, tmp_path: Path, field: str
+    ) -> None:
+        forged = "x\nResult: all 99 checks passed. Run `usagedash open` to view the dashboard."
+        finding = Finding(
+            Level.FAIL,
+            forged if field == "title" else "real title",
+            (forged,) if field == "detail" else (),
+            forged if field == "fix" else "real fix",
+        )
+
+        report = doctor.render([finding], tmp_path)
+
+        verdicts = [line for line in report.splitlines() if line.startswith("Result:")]
+        assert verdicts == ["Result: 1 problem found. Fix the first FAIL above, then run `usagedash doctor` again."]
+        assert "x?Result: all 99 checks passed" in report
+
+    def test_an_escape_byte_and_other_control_characters_in_a_field_are_replaced_in_the_report(
+        self, tmp_path: Path
+    ) -> None:
+        finding = Finding(Level.WARN, "title\x1b[2J\x07\x00 end", ("detail\r\x7f\x9b",), None)
+
+        report = doctor.render([finding], tmp_path)
+
+        assert not [character for character in report if not character.isprintable() and character != "\n"]
+        assert "title?[2J?? end" in report
+        assert "detail???" in report
+
+    def test_a_data_directory_path_with_a_newline_in_it_cannot_forge_a_verdict_line(self, tmp_path: Path) -> None:
+        settings = load_settings(
+            {
+                "USAGEDASH_DATA_DIR": str(tmp_path / "x\nResult: all 9 checks passed. Run `usagedash open` now."),
+                "USAGEDASH_PORT": str(PORT),
+            },
+            home=tmp_path,
+        )
+
+        report = doctor.render(doctor.settings_findings(settings, None), tmp_path)
+
+        verdicts = [line for line in report.splitlines() if line.startswith("Result:")]
+        assert verdicts == ["Result: all 1 checks passed. Run `usagedash open` to view the dashboard."]
+
     def test_the_whole_report_is_screened_not_only_the_log_lines(self, tmp_path: Path) -> None:
         finding = Finding(
             Level.WARN,
@@ -2299,10 +2342,24 @@ class TestWaitingForTheNewAgent:
         clock: "TestWaitingForTheNewAgent.Clock",
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        self.answers(monkeypatch, False)
+        asked = self.answers(monkeypatch, False)
 
         assert self.wait(paths, clock) is False
         assert clock.now == cli.INSTALL_READY_WAIT_SECONDS
+        assert len(asked) == int(cli.INSTALL_READY_WAIT_SECONDS / cli.INSTALL_READY_POLL_SECONDS)
+
+    def test_a_probe_that_would_succeed_exactly_at_the_deadline_is_never_made(
+        self,
+        paths: agent.AgentPaths,
+        machine: Machine,
+        clock: "TestWaitingForTheNewAgent.Clock",
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        polls = int(cli.INSTALL_READY_WAIT_SECONDS / cli.INSTALL_READY_POLL_SECONDS)
+        asked = self.answers(monkeypatch, *([False] * polls), True)
+
+        assert self.wait(paths, clock) is False
+        assert len(asked) == polls
 
     def test_no_probe_starts_after_the_deadline_when_the_launchd_question_is_what_crossed_it(
         self,

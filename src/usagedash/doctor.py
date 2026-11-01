@@ -206,9 +206,19 @@ def screen_for_sharing(line: str) -> str:
     return _TOKEN_LIKE.sub(REDACTED, screened)
 
 
+def _single_line(text: str) -> str:
+    """Make text one printable line: a tab becomes a space and any other control character, newline included,
+    becomes ``?``.
+
+    A path, a command name, or an error message can carry bytes that were not written by this package. A newline
+    in one could forge a line of the report, such as a verdict, and an escape byte could drive the terminal.
+    """
+    return "".join(character if character.isprintable() else " " if character == "\t" else "?" for character in text)
+
+
 def _printable(text: str) -> str:
-    """Make text safe to print: a control character in a log or a command name must not drive the terminal."""
-    shown = "".join(character if character.isprintable() else " " if character == "\t" else "?" for character in text)
+    """Make a log line or a command name safe to print, and cut it at ``MAX_LOG_LINE_CHARACTERS``."""
+    shown = _single_line(text)
     return shown if len(shown) <= MAX_LOG_LINE_CHARACTERS else f"{shown[:MAX_LOG_LINE_CHARACTERS]}…"
 
 
@@ -879,12 +889,16 @@ def _verdict(findings: Sequence[Finding]) -> str:
 
 
 def _blocks(findings: Sequence[Finding]) -> str:
+    """One line per title, detail, and remedy. Each field is made a single printable line first, because a title
+    or a detail can carry a path or a message that this package did not write, and a newline in it would add
+    a line of the report that nothing in the report produced.
+    """
     lines: list[str] = []
     for finding in findings:
-        lines.append(f"[{_LEVEL_LABEL[finding.level]}] {finding.title}")
-        lines.extend(f"       {detail}" for detail in finding.details)
+        lines.append(f"[{_LEVEL_LABEL[finding.level]}] {_single_line(finding.title)}")
+        lines.extend(f"       {_single_line(detail)}" for detail in finding.details)
         if finding.fix is not None:
-            lines.append(f"       -> {finding.fix}")
+            lines.append(f"       -> {_single_line(finding.fix)}")
     return "\n".join(lines)
 
 
