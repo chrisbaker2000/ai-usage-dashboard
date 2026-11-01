@@ -831,6 +831,8 @@ def _answer_findings(port: int, view: AgentView) -> list[Finding]:
     * anything else, the agent's state unknown or the holder not seen: the answer cannot be attributed (warning).
 
     For a refusal: the agent running means it is still starting or cannot bind; anything else, nothing listens.
+    Unless a holder was seen: the request runs first and the lookup after, so a refusal and a listener are
+    contradictory evidence (a program began listening between them), and "nothing is listening" is not claimed.
     For a stall, a failure, or an answer that is not a 200: the agent holds the port, restart it; another
     process does, or the agent has none, move the port; otherwise nobody can be blamed, so restart first and
     say what to try after.
@@ -847,6 +849,15 @@ def _answer_findings(port: int, view: AgentView) -> list[Finding]:
         if relation is Relation.AGENT:
             return [Finding(Level.OK, f"The dashboard answers on port {port}")]
         return [_answer_not_attributable(port, view, detail)]
+    if health.kind is HealthKind.REFUSED and holder is not None:
+        return [
+            Finding(
+                Level.FAIL,
+                f"Port {port} refused the health request, but something is listening on it now",
+                (*detail, "The request ran first, so a program began listening between the two checks."),
+                "Run `usagedash doctor` again. If it ends the same way, read the log lines below.",
+            )
+        ]
     if health.kind is HealthKind.REFUSED and view.status is AgentStatus.RUNNING:
         return [
             Finding(

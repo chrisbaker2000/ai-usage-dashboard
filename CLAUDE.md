@@ -273,6 +273,10 @@ ValidError` passing it, because a type name cannot be told from a value by its s
   address reaches (`127.0.0.1` or `*`, from `lsof -Fpcn`); one bound to another interface is not. Two
   different processes that both qualify are no holder at all (a connection reaches only one of them and the
   output does not say which), so neither is blamed or cleared; one process listening twice is one holder.
+  The health request runs before the holder lookup, so a refusal and a holder seen afterwards are
+  contradictory evidence (a program began listening between them): that is its own failure, "refused the
+  health request, but something is listening on it now", and "nothing is listening" is claimed only when
+  no holder was seen. The state matrix asserts it for every combination.
   The log section covers launchd's standard output and standard error and the server's own log, each tail
   shown once. The README prompts are locked by `tests/test_readme_prompts.py` (an existing checkout is
   verified before it is pulled, and doctor runs after every install whatever its exit status was). Each

@@ -1012,6 +1012,11 @@ class TestNothingIsClaimedThatTheEvidenceDoesNotAllow:
             healthy and (unknown or (running and holder_unseen))
         )
         assert (answer.level is Level.OK) <= (healthy and agent_holds)
+        refused = health.kind is HealthKind.REFUSED
+        assert ("nothing is listening" in title.lower()) <= (refused and holder is None)
+        if refused and holder is not None:
+            assert answer.level is Level.FAIL
+            assert title == f"Port {PORT} refused the health request, but something is listening on it now"
         if healthy and stopped:
             assert answer.level is Level.FAIL
         if healthy and running:
@@ -1274,6 +1279,40 @@ class TestWhetherTheDashboardAnswers:
         monkeypatch.setattr(doctor, "_port_is_free", never)
 
         doctor.diagnose_agent(paths, PORT)
+
+    @pytest.mark.parametrize(
+        ("state", "holder"),
+        [
+            (RUNNING, PortHolder(838, "python3.13")),
+            (RUNNING, PortHolder(99, "workerd")),
+            (None, PortHolder(99, "workerd")),
+            (CRASHED, PortHolder(838, "python3.13")),
+            (agent.ServiceState(None, None, None, None, None), PortHolder(99, "workerd")),
+        ],
+        ids=["the agent holds it", "another holds it", "not loaded", "crashed", "state not stated"],
+    )
+    def test_a_refused_request_and_a_listener_seen_afterwards_contradict_each_other_and_say_so(
+        self, paths: agent.AgentPaths, machine: Machine, state: agent.ServiceState | None, holder: PortHolder
+    ) -> None:
+        machine.state, machine.holder, machine.health = state, holder, HealthResult(HealthKind.REFUSED)
+
+        [finding] = [found for found in doctor.diagnose_agent(paths, PORT) if str(PORT) in found.title]
+
+        assert finding.level is Level.FAIL
+        assert finding.title == f"Port {PORT} refused the health request, but something is listening on it now"
+        assert finding.details == (
+            f"Port {PORT} is held by {holder.command} (pid {holder.pid}).",
+            "The request ran first, so a program began listening between the two checks.",
+        )
+        assert finding.fix == "Run `usagedash doctor` again. If it ends the same way, read the log lines below."
+        assert "nothing is listening" not in finding.title.lower()
+
+    def test_a_refused_request_with_no_listener_seen_still_says_nothing_is_listening(
+        self, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        machine.state, machine.holder, machine.health = None, None, HealthResult(HealthKind.REFUSED)
+
+        assert only(doctor.diagnose_agent(paths, PORT), "Nothing is listening").level is Level.FAIL
 
     def test_a_running_agent_that_is_not_listening_yet_is_told_to_wait_and_look_at_the_logs(
         self, paths: agent.AgentPaths, machine: Machine
