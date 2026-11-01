@@ -486,7 +486,7 @@ def _status_lines(paths: agent.AgentPaths, state: agent.ServiceState) -> list[st
     if state.pid is not None:
         headline = f"{paths.label}: running (pid {state.pid})"
     elif state.last_run_failed:
-        headline = f"{paths.label}: loaded, not running; the last run ended with exit {state.last_exit}"
+        headline = f"{paths.label}: loaded, not running; the last run ended with {state.last_exit_description}"
     else:
         headline = f"{paths.label}: loaded, not running ({state.state or 'state not stated'})"
     lines = [headline]

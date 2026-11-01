@@ -8,10 +8,11 @@ unexpected exception is reported by its type and nothing else, like everywhere e
 
 import os
 import re
+import socket
 import stat
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -21,7 +22,7 @@ import httpx2
 from usagedash import agent
 from usagedash.agent import AgentPaths, ServiceState
 from usagedash.api import HEALTH_PATH
-from usagedash.config import LOOPBACK_HOST, Settings
+from usagedash.config import LOOPBACK_HOST, MAX_PORT, MIN_PORT, PORT_ENV, Settings
 from usagedash.errors import ConfigError, UsageDashError
 from usagedash.executables import canonical_executable, checked_executable
 from usagedash.private import ensure_no_ancestor_lets_another_account_replace
@@ -34,6 +35,7 @@ LOG_TAIL_BYTES = 8192
 LOG_TAIL_LINES = 15
 MAX_LOG_LINE_CHARACTERS = 240
 MAX_LISTED_OMISSIONS = 10
+PORT_SUGGESTION_SPAN = 20
 ISSUE_HINT = (
     "Still stuck? Open an issue with the bug template and paste this output. Your home folder is shown as ~; "
     "read it first, and leave out anything you would not post."
@@ -230,9 +232,15 @@ def settings_findings(shell: SettingsOutcome, served: SettingsOutcome) -> list[F
 
 
 def data_directory_findings(settings: Settings) -> list[Finding]:
-    """Check that the data directory is not one another account could replace."""
+    """Check what ``agent install`` and the server require of the data directory, without creating it.
+
+    The ancestors must not be replaceable by another account, and the directory itself must be a real
+    folder this account owns: ``private.ensure_private_directory`` refuses a symbolic link or a file there
+    and cannot make another account's folder private. The ancestry walk does not look at that last entry.
+    """
+    data_dir = settings.data_dir
     try:
-        ensure_no_ancestor_lets_another_account_replace(settings.data_dir)
+        ensure_no_ancestor_lets_another_account_replace(data_dir)
     except ConfigError as error:
         return [
             Finding(
@@ -241,11 +249,22 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
                 fix="Make the directory it names writable by you alone, or point USAGEDASH_DATA_DIR elsewhere.",
             )
         ]
-    if not os.path.lexists(settings.data_dir):
+    try:
+        status = os.lstat(data_dir)
+    except FileNotFoundError:
+        return [Finding(Level.INFO, f"The data directory {data_dir} does not exist yet; the first start makes it")]
+    except OSError as error:
+        return [Finding(Level.FAIL, f"The data directory {data_dir} cannot be examined: {type(error).__name__}")]
+    in_the_way = "Move it aside or point USAGEDASH_DATA_DIR at another folder, then run `usagedash agent install`."
+    if stat.S_ISLNK(status.st_mode):
         return [
-            Finding(Level.INFO, f"The data directory {settings.data_dir} does not exist yet; the first start makes it")
+            Finding(Level.FAIL, f"The data directory {data_dir} is a symbolic link, which is refused", fix=in_the_way)
         ]
-    return [Finding(Level.OK, f"The data directory {settings.data_dir} is safe to use")]
+    if not stat.S_ISDIR(status.st_mode):
+        return [Finding(Level.FAIL, f"The data directory {data_dir} is a file, not a folder", fix=in_the_way)]
+    if status.st_uid != os.geteuid():
+        return [Finding(Level.FAIL, f"The data directory {data_dir} belongs to another account", fix=in_the_way)]
+    return [Finding(Level.OK, f"The data directory {data_dir} is safe to use")]
 
 
 def vendor_findings(settings: Settings) -> list[Finding]:
@@ -275,10 +294,29 @@ def vendor_findings(settings: Settings) -> list[Finding]:
 
 
 def _checked_vendor_finding(name: str, executable: Path) -> Finding:
+    """Apply the check the agent applies before it starts a CLI, then require what that check does not.
+
+    ``canonical_executable`` accepts a missing target and any file mode, so a dangling link or a file
+    without the execute bit would pass it and still fail when the agent starts the CLI.
+    """
     try:
-        return Finding(Level.OK, f"{name}: {canonical_executable(executable)}")
+        resolved = canonical_executable(executable)
     except ConfigError as error:
         return Finding(Level.WARN, f"{name}: {error}")
+    if not os.path.isfile(resolved):
+        return Finding(
+            Level.WARN,
+            f"{name}: {resolved} is not a file",
+            ("A link that points at nothing, or a folder, cannot be run.",),
+            f"Install {name} again, then run `usagedash agent install`.",
+        )
+    if not os.access(resolved, os.X_OK):
+        return Finding(
+            Level.WARN,
+            f"{name}: {resolved} is not executable",
+            fix=f"Run `chmod u+x {resolved}`, then `usagedash agent install`.",
+        )
+    return Finding(Level.OK, f"{name}: {resolved}")
 
 
 def path_findings(settings: Settings) -> list[Finding]:
@@ -317,10 +355,45 @@ def path_findings(settings: Settings) -> list[Finding]:
     return findings
 
 
-def _describe_exit(state: ServiceState) -> str:
-    if state.last_signal not in (None, "", "(none)", "(never signalled)"):
-        return f"signal {state.last_signal}"
-    return f"exit code {state.last_exit}"
+def _port_is_free(port: int) -> bool:
+    """Whether this account can bind ``port`` on the loopback address right now; the socket is closed at once."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((LOOPBACK_HOST, port))
+        except OSError:
+            return False
+    return True
+
+
+def suggest_port(port: int, is_free: Callable[[int], bool] | None = None) -> int | None:
+    """Return a free port close to ``port`` inside the range the settings accept, or None when none is found.
+
+    Ports above come first, then below, each up to ``PORT_SUGGESTION_SPAN`` away. ``port + 1`` alone would be
+    out of range at the maximum, and may be taken as well.
+    """
+    free = _port_is_free if is_free is None else is_free
+    above = range(port + 1, min(port + PORT_SUGGESTION_SPAN, MAX_PORT) + 1)
+    below = range(port - 1, max(port - PORT_SUGGESTION_SPAN, MIN_PORT) - 1, -1)
+    return next((candidate for candidate in (*above, *below) if free(candidate)), None)
+
+
+def _move_fix(port: int) -> str:
+    """Say how to move the dashboard off ``port`` so that the next ``agent install`` keeps the new port.
+
+    The environment variable outranks the config file, so when this shell sets it, naming the file would
+    leave the old port in force. The port is written to the config file otherwise because the agent records
+    the port of the shell that installs it: a port given only in one shell's environment reverts to the
+    file's, or to 8787, the next time `agent install` runs from another.
+    """
+    suggested = suggest_port(port)
+    value = "a free port from 1024 to 65535" if suggested is None else f"{suggested} (free now)"
+    if PORT_ENV in os.environ:
+        setting = f"this shell sets {PORT_ENV}, which outranks the config file, so change it to {value}"
+    else:
+        setting = f"set `port` in the config file to {value}"
+    return (
+        f"Quit that program, or move the dashboard: {setting}, then run `usagedash agent install` and `usagedash open`."
+    )
 
 
 def _agent_findings(paths: AgentPaths) -> tuple[list[Finding], ServiceState | None]:
@@ -367,7 +440,7 @@ def _running_finding(state: ServiceState) -> Finding:
     if state.last_run_failed:
         return Finding(
             Level.FAIL,
-            f"The agent started and stopped ({_describe_exit(state)})",
+            f"The agent started and stopped ({state.last_exit_description})",
             (
                 *facts,
                 f"launchd starts it again after {agent.RESTART_THROTTLE_SECONDS} seconds, and it stops the same "
@@ -389,10 +462,6 @@ def _answer_findings(port: int, state: ServiceState | None) -> list[Finding]:
     health = probe_health(f"http://{LOOPBACK_HOST}:{port}{HEALTH_PATH}")
     holder = port_holder(port)
     agent_pid = None if state is None else state.pid
-    move_fix = (
-        f"Quit that program, or move the dashboard: put `port = {port + 1}` in the config file, then run "
-        "`usagedash agent install` and `usagedash open`."
-    )
     if health.kind is HealthKind.ANSWERED and health.status == HTTP_OK:
         if holder is not None and agent_pid is not None and holder.pid != agent_pid:
             return [
@@ -413,7 +482,7 @@ def _answer_findings(port: int, state: ServiceState | None) -> list[Finding]:
                 Level.FAIL,
                 f"Something other than the dashboard answers on port {port} (HTTP {health.status})",
                 _holder_detail(port, holder),
-                move_fix,
+                _move_fix(port),
             )
         ]
     if health.kind is HealthKind.REFUSED and agent_pid is not None:
@@ -442,7 +511,7 @@ def _answer_findings(port: int, state: ServiceState | None) -> list[Finding]:
                 Level.FAIL,
                 f"Port {port} accepted a connection but did not answer within {HEALTH_TIMEOUT_SECONDS:.0f} seconds",
                 _holder_detail(port, holder),
-                move_fix,
+                _move_fix(port),
             )
         ]
     return [
@@ -450,7 +519,7 @@ def _answer_findings(port: int, state: ServiceState | None) -> list[Finding]:
             Level.FAIL,
             f"The request to port {port} failed before an answer",
             _holder_detail(port, holder),
-            move_fix,
+            _move_fix(port),
         )
     ]
 
@@ -477,15 +546,18 @@ def diagnose_agent(paths: AgentPaths, port: int | None) -> list[Finding]:
 def diagnose(paths: AgentPaths, *, shell: SettingsOutcome, served: SettingsOutcome) -> list[Finding]:
     """Run every check and return the findings in the order they should be read.
 
-    ``shell`` is the settings this shell loads; ``served`` is what the installed agent was installed with,
-    and wins for the port and data directory because that is what is actually running.
+    ``shell`` is the settings this shell loads; ``served`` is what the installed agent was installed with.
+    ``served`` wins for the port, the data directory, and the vendor CLIs, because those are what is actually
+    running: the agent starts the executables pinned in its property list, not the ones this shell would find.
+    The PATH check stays with ``shell``: it asks what ``agent install`` would do if run from here.
     """
     findings = [*system_findings(), *settings_findings(shell, served)]
     effective = served if isinstance(served, Settings) else shell if isinstance(shell, Settings) else None
     if effective is not None:
         findings.extend(data_directory_findings(effective))
+    if effective is not None:
+        findings.extend(vendor_findings(effective))
     if isinstance(shell, Settings):
-        findings.extend(vendor_findings(shell))
         findings.extend(path_findings(shell))
     agent_findings, state = _agent_findings(paths)
     findings.extend(agent_findings)

@@ -357,10 +357,20 @@ class ServiceState:
         ``(never exited)`` and a zero status are not failures. A status this parser cannot read as a number
         is not called a failure either, because the claim would rest on a guess.
         """
-        if self.last_signal not in (None, "", "(none)", "(never signalled)"):
+        if self.last_signal not in _NO_SIGNAL:
             return True
         exit_code = _whole_number(self.last_exit)
         return exit_code is not None and exit_code != 0
+
+    @property
+    def last_exit_description(self) -> str:
+        """How the previous run ended in words: the signal when it was killed by one, else its exit code."""
+        if self.last_signal not in _NO_SIGNAL:
+            return f"signal {self.last_signal}"
+        return f"exit code {self.last_exit}"
+
+
+_NO_SIGNAL = (None, "", "(none)", "(never signalled)")
 
 
 _SERVICE_FIELD = re.compile(

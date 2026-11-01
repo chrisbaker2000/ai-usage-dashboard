@@ -420,9 +420,12 @@ The usual causes, by what you see:
   doctor prints say why. Fix that, then run `agent install` again.
 - **Port 8787 is already in use** (doctor says "Port 8787 is held by …", or "Something other than the
   dashboard answers"). Quit the program it names. Or move the dashboard to another port from 1024 to
-  65535: `USAGEDASH_PORT=8788 .venv/bin/usagedash agent install`, then `.venv/bin/usagedash open`.
-  The agent keeps that port, and `open` follows it. To keep it in the config file instead, set
-  `port = 8788` there.
+  65535: put `port = 8788` in the config file (see [Configuration](#configuration); create the file if
+  it does not exist), then run `.venv/bin/usagedash agent install` and `.venv/bin/usagedash open`.
+  Doctor suggests a port that is free at that moment. If your shell sets `USAGEDASH_PORT`, that
+  variable outranks the file, so change it instead. The agent records the port of the shell that
+  installs it, so a port given in one shell's environment alone is lost the next time `agent install`
+  runs from another; the config file keeps it.
 - **`open` says "nothing answered".** The agent is not running, is still starting, or something else
   holds the port. Doctor tells you which. If you just ran `agent install` and it exited 0, the
   dashboard was answering then, so the agent has stopped since: look at doctor's log lines.

@@ -172,7 +172,14 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
 - **`doctor` changes nothing and one check never hides another.** Every check returns `Finding`s; an error
   this package raised becomes a `FAIL` with its message, anything else is reported by type. It runs
   before settings are loaded (like `status` and `agent uninstall`), so invalid settings are a finding
-  and the agent checks still run. The port asked is the installed agent's, not this shell's. Output shows
+  and the agent checks still run. The port, the data directory, and the vendor CLIs checked are the installed
+  agent's (its plist pins the CLIs), not this shell's; only the PATH check asks what an install from this
+  shell would do. The data directory is checked as install requires it, a real folder this account owns, not
+  only by its ancestors: `ensure_no_ancestor_lets_another_account_replace` skips the last entry. A CLI passes
+  only if `canonical_executable` accepts it and it is also an existing, executable file, which that check
+  does not require. The one thing it ever binds is a loopback port, briefly, to suggest a free one
+  (`doctor.suggest_port`), and only when a conflict is found. The remedy says to change `USAGEDASH_PORT`
+  when this shell sets it, because it outranks the config file. Output shows
   the home folder as `~` (`doctor.abbreviate_home`) because users paste it into issues. Logs are read
   without following a link, without blocking, only as a regular file this account owns
   (`doctor.tail_lines`), and control characters are replaced before printing. A new check goes in

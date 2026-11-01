@@ -89,6 +89,21 @@ class TestParsingWhatLaunchdSays:
     def test_a_number_is_read_only_when_it_is_plainly_one(self, text: str, expected: int | None) -> None:
         assert agent.parse_service_state(f"{TAB}pid = {text}\n").pid == expected
 
+    @pytest.mark.parametrize(
+        ("last_exit", "signal", "described"),
+        [
+            ("1", None, "exit code 1"),
+            ("0", "(none)", "exit code 0"),
+            ("(never exited)", None, "exit code (never exited)"),
+            ("(never exited)", "Killed: 9", "signal Killed: 9"),
+            ("1", "Segmentation fault: 11", "signal Segmentation fault: 11"),
+        ],
+    )
+    def test_how_the_last_run_ended_names_the_signal_when_there_was_one(
+        self, last_exit: str, signal: str | None, described: str
+    ) -> None:
+        assert agent.ServiceState(None, None, None, last_exit, signal).last_exit_description == described
+
     def test_a_field_longer_than_the_limit_is_cut(self) -> None:
         parsed = agent.parse_service_state(f"{TAB}state = {'x' * 500}\n")
 
@@ -234,6 +249,13 @@ def settings_for(tmp_path: Path, port: int = PORT) -> Settings:
     )
 
 
+def _settings_outcome_for(tmp_path: Path) -> Settings | ConfigError:
+    try:
+        return settings_for(tmp_path)
+    except ConfigError as error:
+        return error
+
+
 def titles(findings: list[Finding], level: Level | None = None) -> list[str]:
     return [finding.title for finding in findings if level is None or finding.level is level]
 
@@ -348,7 +370,66 @@ class TestTheAgentChecks:
         ]
 
 
+class TestSuggestingAPort:
+    @staticmethod
+    def free_except(*taken: int) -> Callable[[int], bool]:
+        return lambda port: port not in taken
+
+    def test_the_next_port_up_is_suggested_when_it_is_free(self) -> None:
+        assert doctor.suggest_port(8787, self.free_except()) == 8788
+
+    def test_taken_ports_are_skipped(self) -> None:
+        assert doctor.suggest_port(8787, self.free_except(8788, 8789)) == 8790
+
+    def test_at_the_highest_port_the_suggestion_comes_from_below_and_is_in_range(self) -> None:
+        suggested = doctor.suggest_port(65535, self.free_except())
+
+        assert suggested == 65534
+        assert doctor.MIN_PORT <= suggested <= doctor.MAX_PORT
+
+    def test_at_the_lowest_port_the_suggestion_comes_from_above(self) -> None:
+        assert doctor.suggest_port(1024, self.free_except()) == 1025
+
+    def test_ports_above_are_tried_before_ports_below_and_only_within_the_span(self) -> None:
+        above = range(8788, 8787 + doctor.PORT_SUGGESTION_SPAN + 1)
+
+        assert doctor.suggest_port(8787, self.free_except(*above)) == 8786
+        assert doctor.suggest_port(8787, lambda port: port == 8787 + doctor.PORT_SUGGESTION_SPAN + 1) is None
+
+    def test_no_port_is_suggested_when_none_nearby_is_free(self) -> None:
+        assert doctor.suggest_port(8787, lambda _port: False) is None
+
+    def test_the_suggestion_never_leaves_the_range_the_settings_accept(self) -> None:
+        offered: list[int] = []
+
+        def record(port: int) -> bool:
+            offered.append(port)
+            return False
+
+        for port in (doctor.MIN_PORT, doctor.MAX_PORT):
+            offered.clear()
+            doctor.suggest_port(port, record)
+            assert offered
+            assert all(doctor.MIN_PORT <= candidate <= doctor.MAX_PORT for candidate in offered)
+            assert port not in offered
+
+    def test_a_port_someone_listens_on_is_not_free_and_a_released_one_is(self) -> None:
+        with socket.socket() as holder:
+            holder.bind(("127.0.0.1", 0))
+            holder.listen()
+            port = holder.getsockname()[1]
+
+            assert doctor._port_is_free(port) is False
+
+        assert doctor._port_is_free(port) is True
+
+
 class TestWhetherTheDashboardAnswers:
+    @pytest.fixture(autouse=True)
+    def every_nearby_port_is_free(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(doctor, "_port_is_free", lambda _port: True)
+        monkeypatch.delenv("USAGEDASH_PORT", raising=False)
+
     def test_an_answering_dashboard_held_by_the_agent_is_fine(self, paths: agent.AgentPaths, machine: Machine) -> None:
         machine.holder = PortHolder(838, "python3.13")
 
@@ -380,8 +461,55 @@ class TestWhetherTheDashboardAnswers:
         assert finding.level is Level.FAIL
         assert finding.title.endswith("(HTTP 404)")
         assert finding.details == (f"Port {PORT} is held by workerd (pid 77).",)
+        assert finding.fix == (
+            f"Quit that program, or move the dashboard: set `port` in the config file to {PORT + 1} (free now), "
+            "then run `usagedash agent install` and `usagedash open`."
+        )
+
+    def test_the_remedy_names_the_environment_variable_when_this_shell_sets_it(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("USAGEDASH_PORT", str(PORT))
+        machine.health = HealthResult(HealthKind.ANSWERED, 404)
+
+        finding = only(doctor.diagnose_agent(paths, PORT), "Something other than the dashboard")
+
+        assert finding.fix == (
+            "Quit that program, or move the dashboard: this shell sets USAGEDASH_PORT, which outranks the config "
+            f"file, so change it to {PORT + 1} (free now), then run `usagedash agent install` and `usagedash open`."
+        )
+
+    def test_the_remedy_at_the_highest_port_is_a_port_the_settings_accept(
+        self, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        machine.health = HealthResult(HealthKind.ANSWERED, 404)
+
+        finding = only(doctor.diagnose_agent(paths, doctor.MAX_PORT), "Something other than the dashboard")
+
         assert finding.fix is not None
-        assert f"port = {PORT + 1}" in finding.fix
+        assert "to 65534 (free now)" in finding.fix
+        assert "65536" not in finding.fix
+
+    def test_the_remedy_asks_for_any_free_port_when_none_nearby_is_free(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(doctor, "_port_is_free", lambda _port: False)
+        machine.health = HealthResult(HealthKind.TIMED_OUT)
+
+        finding = only(doctor.diagnose_agent(paths, PORT), "did not answer")
+
+        assert finding.fix is not None
+        assert "to a free port from 1024 to 65535, then run" in finding.fix
+
+    def test_a_healthy_dashboard_never_probes_for_a_free_port(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def never(_port: int) -> bool:
+            raise AssertionError("a free port is looked for only when the port is in the way")
+
+        monkeypatch.setattr(doctor, "_port_is_free", never)
+
+        doctor.diagnose_agent(paths, PORT)
 
     def test_a_running_agent_that_is_not_listening_yet_is_told_to_wait_and_look_at_the_logs(
         self, paths: agent.AgentPaths, machine: Machine
@@ -519,6 +647,148 @@ class TestTheFullDiagnosis:
             only(doctor.diagnose(paths, shell=settings_for(tmp_path), served=None), "is safe to use").level is Level.OK
         )
 
+    def test_a_symbolic_link_at_the_data_path_is_a_failure_even_when_it_points_at_a_folder(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (tmp_path / "data").symlink_to(elsewhere)
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
+
+        failure = only(findings, "is a symbolic link")
+        assert failure.level is Level.FAIL
+        assert failure.fix is not None
+        assert "USAGEDASH_DATA_DIR" in failure.fix
+        assert "is safe to use" not in " ".join(titles(findings))
+
+    def test_a_file_at_the_data_path_is_a_failure(self, tmp_path: Path) -> None:
+        settings = settings_for(tmp_path)
+        (tmp_path / "data").write_text("")
+
+        findings = doctor.data_directory_findings(settings)
+
+        assert titles(findings, Level.FAIL) == [f"The data directory {tmp_path / 'data'} is a file, not a folder"]
+
+    def test_settings_that_cannot_be_read_because_a_file_is_in_the_way_are_reported_as_a_settings_failure(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        (tmp_path / "data").write_text("")
+        outcome = _settings_outcome_for(tmp_path)
+
+        findings = doctor.diagnose(paths, shell=outcome, served=None)
+
+        assert isinstance(outcome, ConfigError)
+        assert only(findings, "The settings cannot be loaded").level is Level.FAIL
+
+    def test_a_data_directory_that_belongs_to_another_account_is_a_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = settings_for(tmp_path)
+        data = tmp_path / "data"
+        data.mkdir()
+        owner = os.stat(data).st_uid
+        monkeypatch.setattr(doctor, "ensure_no_ancestor_lets_another_account_replace", lambda _directory: None)
+        monkeypatch.setattr(doctor.os, "geteuid", lambda: owner + 1)
+
+        findings = doctor.data_directory_findings(settings)
+
+        assert titles(findings, Level.FAIL) == [f"The data directory {data} belongs to another account"]
+        assert "is safe to use" not in " ".join(titles(findings))
+
+    def test_a_data_directory_this_account_owns_is_safe_to_use(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = settings_for(tmp_path)
+        (tmp_path / "data").mkdir()
+        monkeypatch.setattr(doctor, "ensure_no_ancestor_lets_another_account_replace", lambda _directory: None)
+
+        assert titles(doctor.data_directory_findings(settings), Level.OK) == [
+            f"The data directory {tmp_path / 'data'} is safe to use"
+        ]
+
+    def test_a_data_directory_that_cannot_be_examined_is_a_failure_named_by_its_error_type(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        data = tmp_path / "data"
+        real_lstat = os.lstat
+
+        def lstat(path: str | Path) -> os.stat_result:
+            if Path(path) == data:
+                raise PermissionError
+            return real_lstat(path)
+
+        monkeypatch.setattr(doctor, "ensure_no_ancestor_lets_another_account_replace", lambda _directory: None)
+        monkeypatch.setattr(doctor.os, "lstat", lstat)
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
+
+        assert (
+            only(findings, "cannot be examined").title
+            == f"The data directory {data} cannot be examined: PermissionError"
+        )
+
+    def test_the_binaries_the_agent_was_installed_with_are_checked_not_the_ones_this_shell_finds(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pinned = tmp_path / "pinned-claude"
+        pinned.write_text("#!/bin/sh\n")
+        pinned.chmod(0o755)
+        monkeypatch.setattr(doctor, "canonical_executable", lambda executable: executable)
+        served = replace(settings_for(tmp_path), binaries=Binaries(str(pinned), "codex", "grok"))
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=served)
+
+        assert only(findings, "claude: ").title == f"claude: {pinned}"
+        assert "claude: not found on PATH" not in titles(findings)
+
+    def test_the_installed_binaries_are_still_checked_when_this_shells_settings_do_not_load(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        findings = doctor.diagnose(paths, shell=ConfigError("port must be an integer"), served=settings_for(tmp_path))
+
+        assert only(findings, "claude: not found").level is Level.INFO
+        assert only(findings, "The settings cannot be loaded").level is Level.FAIL
+
+    def test_a_cli_link_that_points_at_nothing_is_a_warning_not_an_ok(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dangling = tmp_path / "claude"
+        dangling.symlink_to(tmp_path / "removed")
+        monkeypatch.setattr(doctor, "canonical_executable", lambda executable: tmp_path / "removed")
+        settings = replace(settings_for(tmp_path), binaries=Binaries(str(dangling), "codex", "grok"))
+
+        finding = only(doctor.diagnose(paths, shell=settings, served=None), "claude: ")
+
+        assert finding.level is Level.WARN
+        assert finding.title == f"claude: {tmp_path / 'removed'} is not a file"
+        assert finding.fix == "Install claude again, then run `usagedash agent install`."
+
+    def test_a_cli_that_is_a_folder_is_a_warning_not_an_ok(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        folder = tmp_path / "claude"
+        folder.mkdir()
+        monkeypatch.setattr(doctor, "canonical_executable", lambda executable: executable)
+        settings = replace(settings_for(tmp_path), binaries=Binaries(str(folder), "codex", "grok"))
+
+        assert only(doctor.diagnose(paths, shell=settings, served=None), "claude: ").level is Level.WARN
+
+    def test_a_cli_without_the_execute_bit_is_a_warning_that_names_the_chmod(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plain = tmp_path / "claude"
+        plain.write_text("#!/bin/sh\n")
+        plain.chmod(0o644)
+        monkeypatch.setattr(doctor, "canonical_executable", lambda executable: executable)
+        settings = replace(settings_for(tmp_path), binaries=Binaries(str(plain), "codex", "grok"))
+
+        finding = only(doctor.diagnose(paths, shell=settings, served=None), "claude: ")
+
+        assert finding.level is Level.WARN
+        assert finding.title == f"claude: {plain} is not executable"
+        assert finding.fix == f"Run `chmod u+x {plain}`, then `usagedash agent install`."
+
     def test_a_vendor_cli_that_is_not_installed_is_information_not_a_problem(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
     ) -> None:
@@ -543,6 +813,7 @@ class TestTheFullDiagnosis:
     ) -> None:
         good, bad = tmp_path / "good", tmp_path / "bad"
         good.write_text("")
+        good.chmod(0o755)
         bad.write_text("")
 
         def canonical(executable: Path) -> Path:
@@ -1165,8 +1436,22 @@ class TestAgentStatus:
         assert cli.main(["agent", "status"]) == cli.EXIT_OK
 
         first = capsys.readouterr().out.splitlines()[0]
-        assert first == f"{label}: loaded, not running; the last run ended with exit 1"
+        assert first == f"{label}: loaded, not running; the last run ended with exit code 1"
         assert "running (pid" not in first
+
+    def test_a_loaded_agent_killed_by_a_signal_is_reported_by_the_signal_not_an_exit_code(
+        self, home: Path, label: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(agent, "is_loaded", lambda _paths: True)
+        monkeypatch.setattr(
+            agent, "service_state", lambda _paths: agent.ServiceState("waiting", None, 2, "(never exited)", "Killed: 9")
+        )
+
+        cli.main(["agent", "status"])
+
+        first = capsys.readouterr().out.splitlines()[0]
+        assert first == f"{label}: loaded, not running; the last run ended with signal Killed: 9"
+        assert "exit code" not in first
 
     def test_a_loaded_agent_with_no_process_and_no_failure_names_launchds_state(
         self, home: Path, label: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
