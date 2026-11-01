@@ -175,7 +175,7 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
         [\w-]*(?:authorization|api[_-]?key|secret|password|passwd)[\w-]*   # the name, with any prefix or suffix
         ["']?\s*[=:]\s*                                                    # a closing quote and the separator
     )
-    (?: "[^"]*" | '[^']*' | [^\s"',}]+ )                                   # the value, quoted or not
+    .*                                                                     # the rest of the line, whatever its syntax
     """
 )
 _TOKEN_LIKE = re.compile(r"[A-Za-z0-9_+=-]{32,}")
@@ -187,11 +187,16 @@ def screen_for_sharing(line: str) -> str:
 
     The server and the launchd capture hold no credentials by design, but a crash before logging starts can put
     anything Python printed into the capture. This is a net, not a promise: it removes email addresses, a value
-    after ``Bearer``, the value of an assignment whose name holds ``authorization``, ``api_key``, ``secret``,
-    ``password``, or ``passwd`` (with any prefix or suffix, such as ``DB_PASSWORD``, and with or without quotes
-    around the name or the value, as in JSON), and any run of 32 or more token characters. A word such as
-    ``token`` alone is left, so that ``cannot read access-token: PermissionError`` still says what it says.
-    Nothing here may be cited as a guarantee that the output holds no credential.
+    after ``Bearer``, any run of 32 or more token characters, and, after a name that holds ``authorization``,
+    ``api_key``, ``secret``, ``password``, or ``passwd`` (with any prefix or suffix, such as ``DB_PASSWORD``,
+    and with or without quotes around it) and its ``=`` or ``:``, the rest of the line.
+
+    The rest of the line goes whatever it looks like. A screen that models the value's syntax is bypassed by
+    the next syntax (a scheme and a credential, an escaped quote, a comma inside the value), so none is
+    modelled. What that costs is the remainder of such a line, and what it does not see is a value printed on
+    a later line than its name. A word such as ``token`` alone is left, so that ``cannot read access-token:
+    PermissionError`` still says what it says. Nothing here may be cited as a guarantee that the output
+    holds no credential.
     """
     screened = _BEARER_VALUE.sub(f"Bearer {REDACTED}", line)
     screened = _CREDENTIAL_ASSIGNMENT.sub(lambda match: f"{match.group(1)}{REDACTED}", screened)

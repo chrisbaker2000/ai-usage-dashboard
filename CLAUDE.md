@@ -217,7 +217,11 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   that finding may have none. `test_a_report_without_a_failure_has_established_that_the_dashboard_answers`
   runs 224 combinations of launchd outcome, property-list state, shell settings, health result, and
   holder; re-introducing either rule's bug fails it on exactly its own cases. Log lines are screened
-  before they are printed (`doctor.screen_for_sharing`) because the output is meant to be pasted publicly. `TestNothingIsClaimedThatTheEvidenceDoesNotAllow`
+  before they are printed (`doctor.screen_for_sharing`) because the output is meant to be pasted publicly.
+  After a credential-looking name the whole rest of the line is replaced and the value's syntax is never
+  parsed: two review rounds in a row found a syntax the previous patch missed (a scheme plus a credential,
+  then an escaped quote). `test_no_value_syntax_lets_a_secret_survive_the_screen_after_a_credential_name`
+  is the list a change must keep passing; add the next syntax there, not a new branch in the regex. `TestNothingIsClaimedThatTheEvidenceDoesNotAllow`
   runs every combination (7 agent states, 3 holders, 6 health results) against stated invariants. Seven
   review rounds on branch-by-branch logic each found the next unknown input; the table and that test are
   the close for the class, and a mutation of either rule fails it. A holder is a listener the loopback

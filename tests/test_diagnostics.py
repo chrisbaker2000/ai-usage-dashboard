@@ -1793,7 +1793,7 @@ class TestReadingALog:
         log.write_text("owner@example.com used api_key=sk-test-value on /api/state\nAccepted GET /api/state: ok\n")
 
         assert doctor.tail_lines(log) == [
-            "<email> used api_key=<redacted> on /api/state",
+            "<email> used api_key=<redacted>",
             "Accepted GET /api/state: ok",
         ]
 
@@ -1808,7 +1808,8 @@ class TestReadingALog:
             ),
             ("owner@example.com failed", "<email> failed"),
             ("first.last+tag@mail.example.co.uk failed", "<email> failed"),
-            ("Authorization: Bearer abcdef", "Authorization: <redacted> <redacted>"),
+            ("Authorization: Bearer abcdef", "Authorization: <redacted>"),
+            ("Authorization: Basic dXNlcjpwYXNz", "Authorization: <redacted>"),
             ("sent bearer abcdef now", "sent Bearer <redacted> now"),
             ("api_key=sk-test-value", "api_key=<redacted>"),
             ("API-KEY: sk-test-value", "API-KEY: <redacted>"),
@@ -1819,19 +1820,52 @@ class TestReadingALog:
             ("a" * 31, "a" * 31),
             ("sha " + "0123456789abcdef" * 4, "sha <redacted>"),
             ("owner@example.com api_key=abc", "<email> api_key=<redacted>"),
-            ('{"password": "abc123"}', '{"password": <redacted>}'),
-            ("{'api_key': 'abc'}", "{'api_key': <redacted>}"),
+            ('{"password": "abc123"}', '{"password": <redacted>'),
+            ("{'api_key': 'abc'}", "{'api_key': <redacted>"),
             ("DB_PASSWORD=abc123", "DB_PASSWORD=<redacted>"),
             ("OPENAI_API_KEY=sk-abc", "OPENAI_API_KEY=<redacted>"),
             ("x-api-key: abc", "x-api-key: <redacted>"),
             ('client_secret = "abc def"', "client_secret = <redacted>"),
-            ('password="abc",next=1', "password=<redacted>,next=1"),
-            ('{"user": "greg", "password": "p w", "ok": 1}', '{"user": "greg", "password": <redacted>, "ok": 1}'),
+            ('password="abc",next=1', "password=<redacted>"),
+            ('{"user": "greg", "password": "p w", "ok": 1}', '{"user": "greg", "password": <redacted>'),
             ("", ""),
         ],
     )
     def test_screening_replaces_what_could_be_a_credential_and_nothing_else(self, line: str, screened: str) -> None:
         assert doctor.screen_for_sharing(line) == screened
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "password={s}",
+            'password="{s}"',
+            "password='{s}'",
+            '{{"password": "{s}"}}',
+            'password="a\\"{s}"',
+            "password='a\\'{s}'",
+            "password=a,{s}",
+            "password=a}}{s}",
+            'password="a b {s}"',
+            "Authorization: Basic {s}",
+            "Authorization: Bearer {s}",
+            "Authorization: Token abc {s}",
+            "Authorization: Digest username=x, response={s}",
+            "DB_PASSWORD = {s}",
+            "x-api-key:{s}",
+            'client_secret="p, q}} {s}"',
+            "PASSWORD:\t{s}",
+            '"secret" : "{s}"',
+            "api-key = 'one' 'two' {s}",
+            "passwd={s} trailing words",
+        ],
+    )
+    def test_no_value_syntax_lets_a_secret_survive_the_screen_after_a_credential_name(self, template: str) -> None:
+        secret = "S3cr3tValue"
+
+        screened = doctor.screen_for_sharing(template.format(s=secret))
+
+        assert secret not in screened
+        assert doctor.REDACTED in screened
 
 
 class TestFindingWhoHoldsAPort:
