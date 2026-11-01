@@ -132,6 +132,10 @@ def port_holder(port: int) -> PortHolder | None:
     ``lsof`` lists only this account's processes without administrator rights, so None means "none that
     this account can see", not "free". A listener bound to another interface cannot answer the dashboard's
     address and is not a holder.
+
+    A nonzero exit is no answer, whatever was printed before it: ``lsof`` exits 1 both for "nothing listens"
+    and when it could not examine everything, and a partial list with one listener in it would name a holder
+    that another process, unseen, may share the port with.
     """
     try:
         result = subprocess.run(
@@ -142,6 +146,8 @@ def port_holder(port: int) -> PortHolder | None:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
         return None
     return _loopback_holder(result.stdout)
 
@@ -183,10 +189,9 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
     (
         (?:authorization|api[_-]?key|secret|password|passwd|token|cookie|credential|private[_-]?key)
                                                                # a credential name, inside any longer name
-        [^=:\n]{0,64}                                          # what sits before the separator: [0], .value, a quote
+        [^=:\n]*                                               # what sits before the separator, however long
         [=:]                                                   # the separator
     )
-    (?! [ \t]* (?-i: (?:[A-Za-z_]\w*\.)* [A-Z][A-Za-z]*(?:Error|Exception) ) [ \t]* $ )   # unless only a type follows
     ([ \t]*)                                                   # the spacing, kept
     .*                                                         # the rest of the line, whatever its syntax
     """
@@ -212,19 +217,20 @@ def _screen_line(line: str) -> str:
     anything Python printed into the capture. This is a net, not a promise: it removes email addresses, a value
     after ``Bearer``, the user and password in ``scheme://user:password@host``, any run of 32 or more token
     characters, and, after a name that holds ``authorization``, ``api_key``, ``secret``, ``password``,
-    ``passwd``, ``token``, ``cookie``, ``credential``, or ``private_key`` and up to 64 characters of anything
-    but a separator (a prefix such as ``DB_``, a quote, ``[0]``, ``.value``) and then ``=`` or ``:``, the rest
-    of the line.
+    ``passwd``, ``token``, ``cookie``, ``credential``, or ``private_key`` and anything but a separator (a
+    prefix such as ``DB_``, a quote, ``[0]``, ``.value``, a dotted path of any length) and then ``=`` or ``:``,
+    the rest of the line.
 
-    The rest of the line goes whatever it looks like, and the name's own shape is not modelled either. A screen
-    that models the value's or the name's syntax is bypassed by the next syntax (a scheme and a credential, an
-    escaped quote, a comma inside the value, an index on the name), so none is modelled. What that costs is
-    the remainder of such a line, and what it does not see is a value printed on a later line than its name.
+    The rest of the line goes whatever it looks like, and the name's own shape and length are not modelled
+    either. A screen that models the value's or the name's syntax is bypassed by the next syntax (a scheme and
+    a credential, an escaped quote, a comma inside the value, an index on the name, a name longer than the
+    allowance for one), so none is modelled. What that costs is the remainder of such a line, and what it does
+    not see is a value printed on a later line than its name.
 
-    One exemption keeps a diagnosis readable: when everything after the separator is a bare exception type, as
-    in ``cannot read access-token: PermissionError``, nothing is replaced, because a type name is not a value.
-    A credential printed under a name that holds none of the words above passes. Nothing here may be cited as a
-    guarantee that the output holds no credential.
+    There is no exemption for a remainder that looks like an exception type: ``password: ValueError`` is as
+    likely a password as anything else, and a type name cannot be told from a value by its shape. A credential
+    printed under a name that holds none of the words above passes. Nothing here may be cited as a guarantee
+    that the output holds no credential.
     """
     screened = _BEARER_VALUE.sub(f"Bearer {REDACTED}", line)
     screened = _CREDENTIAL_ASSIGNMENT.sub(lambda match: f"{match.group(1)}{match.group(2)}{REDACTED}", screened)
@@ -273,6 +279,8 @@ def tail_lines(path: Path, *, max_lines: int = LOG_TAIL_LINES, max_bytes: int = 
         os.close(descriptor)
     begins_a_line = start == 0 or data[:1] == b"\n"
     lines = data[start - before :].decode("utf-8", errors="replace").splitlines()
+    if not begins_a_line and len(lines) == 1:
+        return [f"(the last line is longer than {max_bytes} bytes and is not shown; open {path} to read it)"]
     if not begins_a_line and lines:
         lines = lines[1:]
     return [_printable(screen_for_sharing(line)) for line in lines[-max_lines:]]
@@ -488,11 +496,25 @@ def _vendor_finding(name: str, executable: str, agent_path: str, working_directo
 def path_findings(settings: Settings) -> list[Finding]:
     """Report the PATH directories ``agent install`` would leave off, and flag one that holds a vendor CLI."""
     binaries = settings.binaries
+    vendor_commands = [binaries.claude, binaries.codex, binaries.grok]
     try:
-        omissions = agent.agent_path_omissions([binaries.claude, binaries.codex, binaries.grok])
+        omissions = agent.agent_path_omissions(vendor_commands)
+        helper_problems = agent.helper_problems(vendor_commands, settings.data_dir)
     except OSError as error:
         return [Finding(Level.WARN, f"This shell's PATH could not be examined: {type(error).__name__}")]
     findings = [
+        Finding(
+            Level.WARN,
+            f"`agent install` would refuse a helper Claude needs: {problem}",
+            (
+                "Claude reads its login from the keychain through `security`, which this PATH does not reach, so "
+                "install supplies it from a private folder and checks it first.",
+            ),
+            "Fix what that names, then run `usagedash agent install`.",
+        )
+        for problem in helper_problems
+    ]
+    findings += [
         Finding(
             Level.WARN,
             f"The directory of a vendor CLI would be left off the agent's PATH: {omission.directory}",

@@ -220,15 +220,21 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   before they are printed (`doctor.screen_for_sharing`) because the output is meant to be pasted publicly.
   The names are `authorization`, `api_key`, `secret`, `password`, `passwd`, `token`, `cookie`,
   `credential`, `private_key`; `scheme://user:password@` userinfo is replaced too
-  (`doctor._URL_CREDENTIALS`). The one remainder left readable is a bare exception or error type name
-  alone on the rest of the line (`TokenExpiredError`), matched case-sensitively through a scoped
-  `(?-i:...)` group and anchored at the end of the line, so a traceback's last line survives and
-  `token: AbcError extra` does not. The exemption is a lookahead placed right after the separator, with the
-  spacing a group of its own: optional trailing spaces otherwise backtrack to zero and defeat it.
+  (`doctor._URL_CREDENTIALS`). There is no exemption for a remainder that looks like an exception type:
+  one was tried (a case-sensitive lookahead for a bare `...Error`) and a review showed `password:
+ValidError` passing it, because a type name cannot be told from a value by its shape. Its cost is that
+  a reason after a path holding a credential word, such as `1password-mcp: PermissionError`, is replaced.
+  That is accepted and recorded in `docs/known-limitations.md`; do not bring the exemption back.
   After a credential-looking name the whole rest of the line is replaced and neither the value's syntax nor
-  the name's shape is parsed (the name may be followed by up to 64 characters before its separator, so
-  `password[0]=` and `DB_PASSWORD=` both match): three review rounds in a row found a syntax the previous
-  patch missed (a scheme plus a credential, an escaped quote, an index on the name). The whole rendered
+  the name's shape or length is parsed (the text before the separator has no limit, so `password[0]=`,
+  `DB_PASSWORD=`, and a long dotted field name all match; a 64-character allowance was tried and a review
+  showed a 70-character name passing it): four review rounds in a row found a syntax the previous
+  patch missed (a scheme plus a credential, an escaped quote, an index on the name, a long name). A log
+  line longer than the window is reported as too long, never shown cut (`doctor.tail_lines`): the cut end
+  may have lost the credential name that says its value is one. A nonzero `lsof` exit is no answer
+  (`doctor.port_holder`), and `doctor.path_findings` also asks what `agent install` would refuse for the
+  required `security` helper (`agent.helper_problems`, `executables.required_helper_problems`: the same
+  checks as `with_required_helpers`, changing nothing). The whole rendered
   report is screened, not only the log lines it quotes, because it also echoes settings values and paths.
   Every finding field is also made one printable line when the report is formatted (`doctor._single_line`):
   a path or message this package did not write can carry a newline, which would add a line of the report

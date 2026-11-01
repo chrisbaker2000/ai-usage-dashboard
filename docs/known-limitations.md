@@ -117,7 +117,9 @@ not running at all and something else answers.
 - **The port holder is only what this account can see.** `doctor` asks `lsof`, which lists only this
   account's processes without administrator rights, and counts only a listener that a connection to
   `127.0.0.1` reaches. A holder it names is real; an absent holder is not proof the port is free, and it
-  is never taken for another program. With the agent running and no holder visible, a healthy answer is a
+  is never taken for another program. A nonzero exit from `lsof` is no answer at all, even when it printed
+  a listener first: it exits 1 for "nothing listens" and for "could not examine everything", and a partial
+  list could name a holder that an unseen process shares the port with. With the agent running and no holder visible, a healthy answer is a
   warning that doctor could not tell whether the agent gave it, not an all-clear. The probe of `/healthz`
   is what says whether anything answers.
 - **launchd's state comes from `launchctl print`**, which Apple does not document as an interface. A
@@ -131,19 +133,21 @@ not running at all and something else answers.
   addresses, a value after `Bearer`, the user and password of a `scheme://user:password@` address, and
   any run of 32 or more token characters are replaced, and after a name that holds `authorization`,
   `api_key`, `secret`, `password`, `passwd`, `token`, `cookie`, `credential`, or `private_key` (followed
-  by up to 64 characters of anything but a separator, so `DB_PASSWORD`, `password[0]`, and a quoted name
-  all match) and its `=` or `:`, **the rest of the line** is replaced. One remainder is left readable: a
-  line whose whole remainder is an exception or error type name such as `TokenExpiredError`, because a
-  traceback's last line is the most useful line of a crash and a type name is not a value. The match for
-  that name is case-sensitive and anchored at the end of the line, so `token: AbcError extra` is still
-  replaced. The same screen runs over the whole report,
-  not only the log lines, because the report also echoes settings values and paths. Neither the value's
-  syntax nor the name's shape is modelled: a screen that parses either is bypassed by the next syntax (a
-  scheme and a credential, an escaped quote, a comma inside the value, an index on the name). The cost is
-  the remainder of such a line. Two things pass: a short credential printed under a name that holds none of
-  those words, and a value printed on a later line than its name. Nothing user-facing promises that the
-  output holds no credential: the home folder is shown as `~`, and the README and the bug template tell
-  users to read the output before posting it.
+  by anything but a separator, of any length, so `DB_PASSWORD`, `password[0]`, a quoted name, and a long
+  dotted field name all match) and its `=` or `:`, **the rest of the line** is replaced. The same screen
+  runs over the whole report, not only the log lines, because the report also echoes settings values and
+  paths. Neither the value's syntax nor the name's shape or length is modelled: a screen that parses
+  either is bypassed by the next syntax (a scheme and a credential, an escaped quote, a comma inside the
+  value, an index on the name, a name past the allowance for one). The cost is the remainder of such a
+  line, including a remainder that is only an error type: `password: ValueError` cannot be told from a
+  password that is the word `ValueError`, so a reason such as `PermissionError` after
+  `/usr/local/bin/1password-mcp:` is replaced too, because that path holds the word `password`. A log
+  line longer than the window `doctor` reads (8 KiB) is reported as too long, with the path of the log,
+  and not shown, because the cut end of a line may have lost the name that says its value is a credential.
+  Two things pass: a short credential printed under a name that holds none of those words, and a value
+  printed on a later line than its name. Nothing user-facing promises that the output holds no
+  credential: the home folder is shown as `~`, and the README and the bug template tell users to read the
+  output before posting it.
 
 ## The retail API cost uses the short-prompt standard rate
 

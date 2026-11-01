@@ -273,6 +273,47 @@ def with_required_helpers(search_path: str, working_directory: Path, helpers: Se
     return os.pathsep.join(part for part in (search_path, str(directory)) if part)
 
 
+def required_helper_problems(search_path: str, working_directory: Path, helpers: Sequence[Path]) -> list[str]:
+    """Return what would stop ``with_required_helpers`` from supplying a helper, changing nothing.
+
+    ``usagedash doctor`` uses this to name, before an install is tried, what that install would refuse: an
+    unsafe helper, a private helper directory another account could change, a link in it that names another
+    target. A helper already on ``search_path`` needs none of that and reports nothing.
+    """
+    problems: list[str] = []
+    for helper in helpers:
+        if shutil.which(helper.name, path=search_path) is not None:
+            continue
+        try:
+            target = Path(checked_executable(helper, "required helper")).resolve()
+        except ConfigError as error:
+            problems.append(str(error))
+            continue
+        except (OSError, RuntimeError) as error:
+            problems.append(f"cannot use required helper {helper}: {type(error).__name__}")
+            continue
+        directory = working_directory / "agent-bin"
+        try:
+            directory.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            problems.append(f"cannot examine {directory}: {type(error).__name__}")
+            continue
+        try:
+            ensure_only_owner_can_change(directory)
+            link = directory / helper.name
+            if Path(os.readlink(link)) != target:
+                problems.append(f"cannot use required helper {link}: it names an unexpected target")
+        except FileNotFoundError:
+            continue
+        except ConfigError as error:
+            problems.append(str(error))
+        except OSError as error:
+            problems.append(f"cannot examine {directory}: {type(error).__name__}")
+    return problems
+
+
 def _leave_out_of_child_path(directory: Path, error: ConfigError) -> None:
     """Log one omission of ``directory`` for this process. The same directory is omitted on every start."""
     spelled = str(directory)

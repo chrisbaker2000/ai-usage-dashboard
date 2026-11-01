@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from tests.fakes.fake_run import FakeRun
-from usagedash import agent, cli, doctor
+from usagedash import agent, cli, doctor, executables
 from usagedash.config import Binaries, Settings, load_settings
 from usagedash.doctor import Finding, HealthKind, HealthResult, Level, PortHolder, SettingsOutcome
 from usagedash.errors import ConfigError, UsageDashError
@@ -212,6 +212,176 @@ class TestPathOmissions:
         assert str(kept) not in omitted
 
 
+class TestRequiredHelpers:
+    """What would stop ``agent install`` from supplying `security`, found without changing anything."""
+
+    @pytest.fixture
+    def helper(self, tmp_path: Path) -> Path:
+        return executable_file(tmp_path / "usr-bin" / "security")
+
+    @staticmethod
+    def problems(helper: Path, working: Path, search_path: str = "") -> list[str]:
+        return executables.required_helper_problems(search_path, working, [helper])
+
+    def test_a_helper_already_on_the_path_needs_nothing(self, tmp_path: Path, helper: Path) -> None:
+        assert self.problems(helper, tmp_path / "data", str(helper.parent)) == []
+
+    def test_a_safe_helper_the_path_lacks_is_supplied_with_no_problem_when_nothing_is_prepared_yet(
+        self, tmp_path: Path, helper: Path
+    ) -> None:
+        assert self.problems(helper, tmp_path / "data") == []
+
+    def test_a_helper_that_is_not_there_is_a_problem_that_names_it(self, tmp_path: Path) -> None:
+        absent = tmp_path / "usr-bin" / "security"
+        absent.parent.mkdir()
+
+        assert self.problems(absent, tmp_path / "data") == [f"cannot use required helper {absent}: FileNotFoundError"]
+
+    def test_a_helper_without_the_execute_bit_is_a_problem(self, tmp_path: Path) -> None:
+        helper = executable_file(tmp_path / "usr-bin" / "security", mode=0o644)
+
+        [problem] = self.problems(helper, tmp_path / "data")
+
+        assert "not an executable regular file" in problem
+
+    @pytest.mark.parametrize("error", [OSError("input/output error"), RuntimeError("symlink loop")])
+    def test_an_error_while_resolving_the_helper_is_a_problem_named_by_its_type(
+        self, tmp_path: Path, helper: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+    ) -> None:
+        def fail(_executable: Path, _purpose: str) -> str:
+            raise error
+
+        monkeypatch.setattr(executables, "checked_executable", fail)
+
+        assert self.problems(helper, tmp_path / "data") == [
+            f"cannot use required helper {helper}: {type(error).__name__}"
+        ]
+
+    def test_a_private_folder_already_holding_the_right_link_is_no_problem(self, tmp_path: Path, helper: Path) -> None:
+        working = tmp_path / "data"
+        folder = working / "agent-bin"
+        folder.mkdir(parents=True, mode=0o700)
+        (folder / "security").symlink_to(helper.resolve())
+
+        assert self.problems(helper, working) == []
+
+    def test_a_private_folder_with_no_link_in_it_yet_is_no_problem(self, tmp_path: Path, helper: Path) -> None:
+        working = tmp_path / "data"
+        (working / "agent-bin").mkdir(parents=True, mode=0o700)
+
+        assert self.problems(helper, working) == []
+
+    def test_a_link_that_names_another_target_is_a_problem(self, tmp_path: Path, helper: Path) -> None:
+        working = tmp_path / "data"
+        folder = working / "agent-bin"
+        folder.mkdir(parents=True, mode=0o700)
+        (folder / "security").symlink_to(tmp_path / "somewhere-else")
+
+        assert self.problems(helper, working) == [
+            f"cannot use required helper {folder / 'security'}: it names an unexpected target"
+        ]
+
+    def test_a_private_folder_another_account_could_change_is_a_problem(self, tmp_path: Path, helper: Path) -> None:
+        working = tmp_path / "data"
+        folder = working / "agent-bin"
+        folder.mkdir(parents=True)
+        folder.chmod(0o777)
+        try:
+            problems = self.problems(helper, working)
+        finally:
+            folder.chmod(0o700)
+
+        assert len(problems) == 1
+        assert str(folder) in problems[0]
+
+    def test_a_private_folder_that_is_not_a_folder_is_a_problem_named_by_its_type(
+        self, tmp_path: Path, helper: Path
+    ) -> None:
+        working = tmp_path / "data"
+        working.mkdir()
+        folder = working / "agent-bin"
+        folder.write_text("")
+        folder.chmod(0o600)
+
+        assert self.problems(helper, working) == [f"cannot use {folder}: NotADirectoryError"]
+
+    def test_a_regular_file_where_the_link_belongs_is_a_problem_named_by_its_type(
+        self, tmp_path: Path, helper: Path
+    ) -> None:
+        working = tmp_path / "data"
+        folder = working / "agent-bin"
+        folder.mkdir(parents=True, mode=0o700)
+        (folder / "security").write_text("")
+
+        assert self.problems(helper, working) == [f"cannot examine {folder}: OSError"]
+
+    def test_a_folder_that_cannot_be_looked_at_is_a_problem_named_by_its_type(
+        self, tmp_path: Path, helper: Path
+    ) -> None:
+        blocker = tmp_path / "blocker"
+        blocker.write_text("")
+
+        assert self.problems(helper, blocker / "data") == [
+            f"cannot examine {blocker / 'data' / 'agent-bin'}: NotADirectoryError"
+        ]
+
+    def test_the_agent_asks_with_the_path_install_builds_and_changes_nothing(
+        self, tmp_path: Path, helper: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(agent, "REQUIRED_PATH_HELPERS", (helper,))
+        working = tmp_path / "data"
+        helper.parent.chmod(0o700)
+
+        on_the_path = agent.helper_problems([], working, str(helper.parent))
+        off_the_path = agent.helper_problems([], working, str(tmp_path))
+
+        assert on_the_path == []
+        assert off_the_path == []
+        assert not working.exists()
+
+    def test_the_agent_reports_the_problem_when_the_path_lacks_an_unsafe_helper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        absent = tmp_path / "nowhere" / "security"
+        monkeypatch.setattr(agent, "REQUIRED_PATH_HELPERS", (absent,))
+
+        [problem] = agent.helper_problems([], tmp_path / "data", str(tmp_path))
+
+        assert problem == f"cannot use {absent.parent}: FileNotFoundError"
+
+    def test_doctor_names_what_install_would_refuse_and_the_command_to_run_after_fixing_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            agent, "helper_problems", lambda _executables, _directory, _shell_path=None: ["cannot use boom"]
+        )
+
+        [finding] = [found for found in doctor.path_findings(settings_for(tmp_path)) if "helper" in found.title]
+
+        assert finding.level is Level.WARN
+        assert finding.title == "`agent install` would refuse a helper Claude needs: cannot use boom"
+        assert finding.fix == "Fix what that names, then run `usagedash agent install`."
+
+    def test_doctor_says_nothing_about_helpers_when_install_would_supply_them(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(agent, "helper_problems", lambda _executables, _directory, _shell_path=None: [])
+
+        assert not [found for found in doctor.path_findings(settings_for(tmp_path)) if "helper" in found.title]
+
+    def test_a_path_that_cannot_be_examined_is_one_warning_for_both_questions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fail(_executables: object, _directory: object, _shell_path: object = None) -> list[str]:
+            raise PermissionError
+
+        monkeypatch.setattr(agent, "helper_problems", fail)
+
+        findings = doctor.path_findings(settings_for(tmp_path))
+
+        assert titles(findings) == ["This shell's PATH could not be examined: PermissionError"]
+
+
 @dataclass
 class Machine:
     """What launchd, the port, and the network say, for the checks that ask them."""
@@ -245,6 +415,7 @@ def machine(monkeypatch: pytest.MonkeyPatch) -> Machine:
     monkeypatch.setattr(agent, "service_state", lambda _paths: fake.state)
     monkeypatch.setattr(doctor, "probe_health", probe)
     monkeypatch.setattr(doctor, "port_holder", lambda _port: fake.holder)
+    monkeypatch.setattr(agent, "helper_problems", lambda _executables, _directory, _shell_path=None: [])
     return fake
 
 
@@ -1838,6 +2009,38 @@ class TestReadingALog:
 
         assert shown == [("word " * 300)[: doctor.MAX_LOG_LINE_CHARACTERS] + "…"]
 
+    def test_a_last_line_longer_than_the_window_is_reported_not_silently_dropped(self, tmp_path: Path) -> None:
+        log = tmp_path / "log"
+        log.write_text("x" * 50)
+
+        assert doctor.tail_lines(log, max_bytes=10) == [
+            f"(the last line is longer than 10 bytes and is not shown; open {log} to read it)"
+        ]
+
+    def test_the_cut_end_of_an_oversized_last_line_is_never_shown_because_its_credential_name_may_be_cut_off(
+        self, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "log"
+        log.write_text("password=" + "hunter2" * 20)
+
+        shown = doctor.tail_lines(log, max_bytes=40)
+
+        assert shown is not None
+        assert "hunter2" not in "".join(shown)
+        assert len(shown) == 1
+
+    def test_a_cut_first_line_is_dropped_when_whole_lines_follow_it(self, tmp_path: Path) -> None:
+        log = tmp_path / "log"
+        log.write_text("older\nnewer\n")
+
+        assert doctor.tail_lines(log, max_bytes=8) == ["newer"]
+
+    def test_a_last_line_exactly_as_long_as_the_window_is_shown_whole(self, tmp_path: Path) -> None:
+        log = tmp_path / "log"
+        log.write_text("x" * 10)
+
+        assert doctor.tail_lines(log, max_bytes=10) == ["x" * 10]
+
     def test_a_credential_or_an_email_address_in_a_log_line_is_replaced_before_it_is_shown(
         self, tmp_path: Path
     ) -> None:
@@ -1853,7 +2056,7 @@ class TestReadingALog:
         ("line", "screened"),
         [
             ("Accepted GET /api/state: signature", "Accepted GET /api/state: signature"),
-            ("cannot read access-token: PermissionError", "cannot read access-token: PermissionError"),
+            ("cannot read access-token: PermissionError", "cannot read access-token: <redacted>"),
             (
                 "/Users/greg/.venv/lib/python3.13/site-packages/usagedash/cli.py",
                 "/Users/greg/.venv/lib/python3.13/site-packages/usagedash/cli.py",
@@ -1988,44 +2191,35 @@ class TestReadingALog:
         assert doctor.screen_for_sharing(line) == screened
 
     @pytest.mark.parametrize(
-        "line",
+        "value",
         [
-            "cannot read access-token: PermissionError",
-            "cannot read access-token: PermissionError  ",
-            "token: FileNotFoundError",
-            "credential: usagedash.errors.ConfigError",
-            "secret: SomeOtherException",
+            "ValidError",
+            "PermissionError",
+            "FileNotFoundError",
+            "usagedash.errors.ConfigError",
+            "SomeOtherException",
+            "S3cr3tValueError",
         ],
     )
-    def test_a_line_whose_whole_remainder_is_a_bare_exception_type_is_left_readable(self, line: str) -> None:
+    def test_a_value_that_looks_like_an_exception_type_is_replaced_like_any_other_value(self, value: str) -> None:
+        assert doctor.screen_for_sharing(f"password: {value}") == "password: <redacted>"
+        assert doctor.screen_for_sharing(f"cannot read access-token: {value}") == "cannot read access-token: <redacted>"
+
+    @pytest.mark.parametrize("name_length", [0, 1, 63, 64, 65, 66, 200, 1000])
+    def test_a_credential_name_is_matched_however_long_the_text_before_its_separator_is(self, name_length: int) -> None:
+        name = "password" + ".part" * (name_length // 5) + "x" * (name_length % 5)
+
+        assert doctor.screen_for_sharing(f"{name}=hunter2") == f"{name}=<redacted>"
+
+    def test_a_long_dotted_credential_field_name_does_not_let_a_short_value_through(self) -> None:
+        line = "password" + ".part" * 14 + "=hunter2"
+
+        assert "hunter2" not in doctor.screen_for_sharing(line)
+
+    def test_a_line_with_many_credential_words_and_no_separator_is_left_alone(self) -> None:
+        line = "token " * 2000
+
         assert doctor.screen_for_sharing(line) == line
-
-    @pytest.mark.parametrize(
-        "line",
-        [
-            "token: PermissionError: S3cr3tValue",
-            "token: PermissionError and S3cr3tValue",
-            "token: S3cr3tValueError",
-            "token: s3cr3tError",
-            "token: PermissionErrors",
-            "token: Error42",
-            "token: lowercaseError",
-            "token: pkg.s3cr3t.Error",
-        ],
-    )
-    def test_the_exemption_does_not_reach_anything_that_is_not_exactly_a_type_name_and_nothing_else(
-        self, line: str
-    ) -> None:
-        screened = doctor.screen_for_sharing(line)
-
-        assert screened == "token: <redacted>"
-
-    def test_a_credential_name_up_to_64_characters_before_its_separator_is_matched_and_one_more_is_not(self) -> None:
-        within = "password" + " a" * 32 + "=v"
-        beyond = "password" + " a" * 32 + " =v"
-
-        assert doctor.screen_for_sharing(within) == "password" + " a" * 32 + "=<redacted>"
-        assert doctor.screen_for_sharing(beyond) == beyond
 
     def test_a_sentence_that_only_mentions_a_credential_name_far_from_any_separator_is_left_alone(self) -> None:
         line = "the password field is described in the long help text that follows and ends here without a separator"
@@ -2207,6 +2401,15 @@ class TestFindingWhoHoldsAPort:
         self, monkeypatch: pytest.MonkeyPatch, output: str
     ) -> None:
         monkeypatch.setattr(doctor.subprocess, "run", FakeRun(returncode=1, stdout=output))
+
+        assert doctor.port_holder(8787) is None
+
+    @pytest.mark.parametrize("returncode", [1, 2, 127, -9])
+    def test_a_failed_lsof_names_no_holder_whatever_it_printed_before_it_failed(
+        self, monkeypatch: pytest.MonkeyPatch, returncode: int
+    ) -> None:
+        output = "p838\ncpython3.13\nf12\nn127.0.0.1:8787\n"
+        monkeypatch.setattr(doctor.subprocess, "run", FakeRun(returncode=returncode, stdout=output))
 
         assert doctor.port_holder(8787) is None
 

@@ -19,7 +19,7 @@ from pathlib import Path
 from xml.parsers.expat import ExpatError
 
 from usagedash.errors import ConfigError, UsageDashError
-from usagedash.executables import REQUIRED_PATH_HELPERS, with_required_helpers
+from usagedash.executables import REQUIRED_PATH_HELPERS, required_helper_problems, with_required_helpers
 from usagedash.executables import canonical_directory as _canonical_directory_only_this_account_can_change
 from usagedash.executables import checked_executable as _checked_executable
 from usagedash.private import (
@@ -160,6 +160,16 @@ def agent_search_path(executables: Sequence[str], shell_path: str | None = None)
 def agent_path_omissions(executables: Sequence[str], shell_path: str | None = None) -> list[PathOmission]:
     """List what ``agent_search_path`` would leave off, without logging, for ``usagedash doctor``."""
     return _assemble_search_path(executables, shell_path)[1]
+
+
+def helper_problems(executables: Sequence[str], working_directory: Path, shell_path: str | None = None) -> list[str]:
+    """List what would stop ``agent install`` from supplying a required helper, changing nothing.
+
+    The PATH is the one ``agent_search_path`` builds, so a helper that PATH loses (this Mac's ``/usr/bin``
+    when another account owns a file in it) is judged exactly as install judges it.
+    """
+    search_path, _ = _assemble_search_path(executables, shell_path)
+    return required_helper_problems(search_path, working_directory, REQUIRED_PATH_HELPERS)
 
 
 def _assemble_search_path(executables: Sequence[str], shell_path: str | None) -> tuple[str, list[PathOmission]]:
