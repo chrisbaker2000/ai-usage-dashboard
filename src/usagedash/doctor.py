@@ -405,7 +405,8 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
     and ``what_lets_another_account_look`` finds nothing: the server makes the directory owner-only, with no
     group or other bits and no access-control list, so a folder that others can open is not as it leaves it.
     This account must also be able to write to it and open it, as the database and its journal need: a folder
-    with only its owner's read bit has nothing wrong by either question and still stops collection.
+    with only its owner's read bit has nothing wrong by either question and still stops collection. That is
+    asked before whether others can look, because a failure must not be reported as the milder warning.
     """
     data_dir = settings.data_dir
     try:
@@ -455,6 +456,15 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
                 make_owner_only,
             )
         ]
+    if not os.access(data_dir, os.W_OK | os.X_OK):
+        return [
+            Finding(
+                Level.FAIL,
+                f"This account cannot write to the data directory {data_dir}",
+                ("The database, its journal, and the access token live there, so collection fails.",),
+                "Run `usagedash agent install`, which makes it writable by you alone again.",
+            )
+        ]
     if visible is not None:
         return [
             Finding(
@@ -465,15 +475,6 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
                     "listing and the sizes and times of what is in it are visible.",
                 ),
                 make_owner_only,
-            )
-        ]
-    if not os.access(data_dir, os.W_OK | os.X_OK):
-        return [
-            Finding(
-                Level.FAIL,
-                f"This account cannot write to the data directory {data_dir}",
-                ("The database, its journal, and the access token live there, so collection fails.",),
-                "Run `usagedash agent install`, which makes it writable by you alone again.",
             )
         ]
     return [Finding(Level.OK, f"The data directory {data_dir} is safe to use")]

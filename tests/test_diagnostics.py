@@ -1790,7 +1790,7 @@ class TestTheFullDiagnosis:
         assert "is safe to use" not in " ".join(titles(findings))
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root can write to a folder with no write bit")
-    @pytest.mark.parametrize("mode", [0o500, 0o400])
+    @pytest.mark.parametrize("mode", [0o500, 0o400, 0o554, 0o550, 0o444, 0o505])
     def test_an_owner_only_data_directory_this_account_cannot_write_to_is_a_failure_not_safe_to_use(
         self, tmp_path: Path, mode: int
     ) -> None:
@@ -1830,7 +1830,7 @@ class TestTheFullDiagnosis:
         assert failure.level is Level.FAIL
         assert asked == [(data, os.W_OK | os.X_OK)]
 
-    @pytest.mark.parametrize("mode", [0o750, 0o755, 0o705, 0o701, 0o710, 0o740, 0o704, 0o554])
+    @pytest.mark.parametrize("mode", [0o750, 0o755, 0o705, 0o701, 0o710, 0o740, 0o704, 0o754])
     def test_a_data_directory_others_can_open_is_a_warning_that_is_not_safe_to_use(
         self, tmp_path: Path, mode: int
     ) -> None:
