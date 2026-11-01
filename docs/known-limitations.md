@@ -106,6 +106,11 @@ process holding the port with the agent's pid and warns when they differ.
 - **An install that does not answer is not rolled back.** The new agent stays installed and launchd
   keeps restarting it. A slow start can still come up, and removing the agent would remove the evidence
   the user needs. The previous agent is not put back either, because it was already stopped.
+- **`doctor` can tighten a file's permissions, as every command can.** It reads the config file and the
+  agent's property list with the same reader as the rest of the commands
+  (`private.read_file_only_owner_can_change`). A file this account owns that other accounts can read is
+  made owner-only on that read; a file another account can write is refused and left as it is. So a
+  `doctor` run does not preserve a mode of 0644 for diagnosis.
 - **The port holder is only what this account can see.** `doctor` asks `lsof`, which lists only this
   account's processes without administrator rights. A holder it names is real; an absent holder is not
   proof the port is free. The probe of `/healthz` is what says whether anything answers.

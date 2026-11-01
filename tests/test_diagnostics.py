@@ -6,6 +6,7 @@ holder are faked, and the health probe runs against sockets opened inside the te
 
 import os
 import socket
+import stat
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
@@ -355,6 +356,64 @@ class TestTheAgentChecks:
 
         assert titles(findings, Level.FAIL) == [
             "The installed property list cannot be trusted: another account could change it"
+        ]
+
+    @staticmethod
+    def untrusted_property_list(monkeypatch: pytest.MonkeyPatch) -> None:
+        def untrusted(_paths: agent.AgentPaths) -> dict[str, str] | None:
+            raise agent.AgentError("another account could change it")
+
+        monkeypatch.setattr(agent, "installed_environment", untrusted)
+
+    def test_an_untrusted_property_list_does_not_hide_a_running_agent(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.untrusted_property_list(monkeypatch)
+
+        findings = doctor.diagnose_agent(paths, None)
+
+        assert titles(findings) == [
+            "The installed property list cannot be trusted: another account could change it",
+            "launchd is running the agent (pid 838)",
+        ]
+        assert "property list is gone" not in " ".join(titles(findings))
+
+    def test_an_untrusted_property_list_does_not_hide_a_crashed_agent_and_its_exit_status(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.untrusted_property_list(monkeypatch)
+        machine.state = CRASHED
+
+        findings = doctor.diagnose_agent(paths, None)
+
+        assert titles(findings, Level.FAIL) == [
+            "The installed property list cannot be trusted: another account could change it",
+            "The agent started and stopped (exit code 1)",
+        ]
+
+    def test_an_untrusted_property_list_with_nothing_loaded_is_reported_once_and_not_as_not_installed(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.untrusted_property_list(monkeypatch)
+        machine.state = None
+
+        assert titles(doctor.diagnose_agent(paths, None)) == [
+            "The installed property list cannot be trusted: another account could change it"
+        ]
+
+    def test_an_untrusted_property_list_and_an_unreachable_launchd_are_both_reported(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.untrusted_property_list(monkeypatch)
+
+        def unreachable(_paths: agent.AgentPaths) -> agent.ServiceState | None:
+            raise agent.AgentError("launchctl print could not be run: FileNotFoundError")
+
+        monkeypatch.setattr(agent, "service_state", unreachable)
+
+        assert titles(doctor.diagnose_agent(paths, None), Level.FAIL) == [
+            "The installed property list cannot be trusted: another account could change it",
+            "launchd cannot be asked about the agent: launchctl print could not be run: FileNotFoundError",
         ]
 
     def test_launchd_that_cannot_be_asked_is_a_failure(
@@ -1165,7 +1224,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class TestTheDoctorCommand:
-    def test_a_healthy_installation_exits_zero_and_changes_nothing(
+    def test_a_healthy_installation_exits_zero_and_creates_nothing(
         self, home: Path, machine: Machine, capsys: pytest.CaptureFixture[str]
     ) -> None:
         machine.environment = {}
@@ -1176,6 +1235,36 @@ class TestTheDoctorCommand:
         assert "Result: all" in output
         assert "FAIL" not in output
         assert not (home / "data").exists()
+
+    def test_a_config_file_other_accounts_can_read_is_made_owner_only_as_every_command_does(
+        self, home: Path, machine: Machine
+    ) -> None:
+        machine.environment = {}
+        data = home / "data"
+        data.mkdir(mode=0o700)
+        config = data / "config.toml"
+        config.write_text("poll_interval_seconds = 300\n")
+        config.chmod(0o644)
+
+        cli.main(["doctor"])
+
+        assert stat.S_IMODE(config.stat().st_mode) == 0o600
+        assert config.read_text() == "poll_interval_seconds = 300\n"
+
+    def test_a_config_file_other_accounts_can_write_is_refused_and_left_as_it_is(
+        self, home: Path, machine: Machine, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        machine.environment = {}
+        data = home / "data"
+        data.mkdir(mode=0o700)
+        config = data / "config.toml"
+        config.write_text("poll_interval_seconds = 300\n")
+        config.chmod(0o666)
+
+        assert cli.main(["doctor"]) == cli.EXIT_FAILURE
+
+        assert "[FAIL] The settings cannot be loaded: cannot use" in capsys.readouterr().out
+        assert stat.S_IMODE(config.stat().st_mode) == 0o666
 
     def test_a_problem_exits_one_and_never_prints_the_home_folder(
         self, home: Path, machine: Machine, capsys: pytest.CaptureFixture[str]

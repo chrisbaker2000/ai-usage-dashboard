@@ -527,7 +527,11 @@ def _settings_outcome(load: Callable[[], Settings | None]) -> doctor.SettingsOut
 
 
 def _doctor() -> int:
-    """Run every check and print the result. Settings and the installed agent are read, nothing is changed."""
+    """Run every check and print the result. Nothing is started, stopped, installed, or created.
+
+    The config file and the property list are read as every command reads them, which makes an owner-owned
+    file that others can read owner-only.
+    """
     paths = agent.agent_paths()
     findings = doctor.diagnose(
         paths,
@@ -596,7 +600,7 @@ def _build_parser() -> argparse.ArgumentParser:
     commands.add_parser("collect", help="run one collection cycle and print the outcome")
     commands.add_parser("status", help="print the latest stored quota state")
     commands.add_parser("open", help="open the dashboard in your browser and sign the browser in")
-    commands.add_parser("doctor", help="check the installation and say what to fix; changes nothing")
+    commands.add_parser("doctor", help="check the installation and say what to fix; starts and stops nothing")
     agent_parser = commands.add_parser("agent", help="manage the launchd agent that keeps the dashboard running")
     agent_parser.add_argument("action", choices=["install", "uninstall", "status"])
     login_parser = commands.add_parser(

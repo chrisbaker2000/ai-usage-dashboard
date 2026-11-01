@@ -1,9 +1,12 @@
 """Read-only diagnosis of an installation: what each check found and, when it is wrong, the next command.
 
-Nothing here starts, stops, or changes anything. Every check reports through a ``Finding`` and keeps going,
-so one failure never hides the ones after it. Messages carry only what this package or launchd produced:
-the text of an error this package raised on purpose, a launchd field, a file's own last lines. An
-unexpected exception is reported by its type and nothing else, like everywhere else in this package.
+Nothing here starts, stops, installs, or removes anything, and no file or folder is created. Settings and the
+installed property list are read the way every command reads them, and that reader makes an owner-owned file
+that others can read owner-only (``private.read_file_only_owner_can_change``): the one change this module can
+cause. Every check reports through a ``Finding`` and keeps going, so one failure never hides the ones after
+it. Messages carry only what this package or launchd produced: the text of an error this package raised on
+purpose, a launchd field, a file's own last lines. An unexpected exception is reported by its type and
+nothing else, like everywhere else in this package.
 """
 
 import os
@@ -398,16 +401,23 @@ def _move_fix(port: int) -> str:
 
 def _agent_findings(paths: AgentPaths) -> tuple[list[Finding], ServiceState | None]:
     """Say whether the agent is installed, loaded, and running, and return launchd's state for later checks."""
+    findings: list[Finding] = []
+    installed: dict[str, str] | None = None
+    plist_untrusted = False
     try:
         installed = agent.installed_environment(paths)
     except UsageDashError as error:
-        return [Finding(Level.FAIL, f"The installed property list cannot be trusted: {error}")], None
+        plist_untrusted = True
+        findings.append(Finding(Level.FAIL, f"The installed property list cannot be trusted: {error}"))
     try:
         state = agent.service_state(paths)
     except UsageDashError as error:
-        return [Finding(Level.FAIL, f"launchd cannot be asked about the agent: {error}")], None
+        findings.append(Finding(Level.FAIL, f"launchd cannot be asked about the agent: {error}"))
+        return findings, None
     install_fix = "Run `usagedash agent install` from the repository directory."
     if state is None:
+        if plist_untrusted:
+            return findings, None
         if installed is None:
             return [Finding(Level.FAIL, "The agent is not installed", fix=install_fix)], None
         return [
@@ -418,8 +428,7 @@ def _agent_findings(paths: AgentPaths) -> tuple[list[Finding], ServiceState | No
                 install_fix,
             )
         ], None
-    findings: list[Finding] = []
-    if installed is None:
+    if installed is None and not plist_untrusted:
         findings.append(Finding(Level.WARN, "launchd lists an agent whose property list is gone", fix=install_fix))
     findings.append(_running_finding(state))
     return findings, state

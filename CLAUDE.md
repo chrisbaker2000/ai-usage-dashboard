@@ -169,7 +169,14 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   error. **It does not roll the agent back**: the new agent stays installed and launchd keeps restarting it,
   because a slow start can still come up and a rollback would hide the log the user needs. An old process
   that answers `/healthz` satisfies the wait; `doctor` names a port holder that is not the agent.
-- **`doctor` changes nothing and one check never hides another.** Every check returns `Finding`s; an error
+- **`doctor` starts, stops, installs, and creates nothing, and one check never hides another.** The one
+  change it can cause is the one every command that reads settings or the property list causes: those reads
+  go through `private.read_file_only_owner_can_change`, which makes an owner-owned file that others can
+  read owner-only (`tests/test_diagnostics.py` locks it). A separate reader that leaves modes alone was
+  weighed and not built: it threads a flag through `load_settings` and the property list path, and the
+  tightening is hardening, not a symptom a diagnosis should preserve. An untrusted property list is a
+  `FAIL` and launchd is still asked, so a loaded or crashed agent keeps its pid and exit status in the
+  report. Every check returns `Finding`s; an error
   this package raised becomes a `FAIL` with its message, anything else is reported by type. It runs
   before settings are loaded (like `status` and `agent uninstall`), so invalid settings are a finding
   and the agent checks still run. The port, the data directory, and the vendor CLIs checked are the installed

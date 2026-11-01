@@ -262,7 +262,7 @@ Run these from the repository directory.
 | Command                                   | What it does                                                             |
 | ----------------------------------------- | ------------------------------------------------------------------------ |
 | `.venv/bin/usagedash open`                | Open the private page in your browser.                                   |
-| `.venv/bin/usagedash doctor`              | Check the whole installation and say what to fix. Changes nothing.       |
+| `.venv/bin/usagedash doctor`              | Check the whole installation and say what to fix. Starts nothing.        |
 | `.venv/bin/usagedash status`              | Print the latest stored quota readings.                                  |
 | `.venv/bin/usagedash collect`             | Run one collection now and print the outcome.                            |
 | `.venv/bin/usagedash agent status`        | Say whether launchd has the agent loaded and running, with pid and logs. |
@@ -395,7 +395,9 @@ your settings, the data folder, the three vendor CLIs, the agent in launchd, whe
 answers, and who holds the port if it does not. Every line starts with `ok`, `info`, `WARN`, or
 `FAIL`, and a `FAIL` names the command that fixes it. Fix the first `FAIL`, then run doctor again.
 When something is wrong it also prints the last lines of the agent's logs. It exits 1 if anything
-failed and changes nothing on your Mac.
+failed. It never starts, stops, installs, or removes anything and creates no files. Like every
+command that reads your config file and the agent's property list, it makes them owner-only if they
+were readable by other accounts.
 
 The usual causes, by what you see:
 
