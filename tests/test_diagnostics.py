@@ -1488,6 +1488,32 @@ class TestTheFullDiagnosis:
 
         assert only(findings, "codex: ").title == f"codex: {on_shell_path.resolve()}"
 
+    def test_without_an_installed_agent_a_relative_path_entry_is_resolved_from_the_directory_doctor_runs_in(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        relative_to_cwd = executable_file(tmp_path / "relative-bin" / "codex")
+        monkeypatch.setenv("PATH", "relative-bin")
+        monkeypatch.chdir(tmp_path)
+        machine.environment, machine.state = None, None
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
+
+        assert only(findings, "codex: ").title == f"codex: {relative_to_cwd.resolve()}"
+
+    def test_a_relative_path_entry_finds_nothing_from_another_directory(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        executable_file(tmp_path / "relative-bin" / "codex")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.setenv("PATH", "relative-bin")
+        monkeypatch.chdir(elsewhere)
+        machine.environment, machine.state = None, None
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
+
+        assert only(findings, "codex: not found").level is Level.INFO
+
     def test_a_pin_whose_file_was_removed_is_judged_by_the_replacement_the_agent_finds(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -1889,6 +1915,15 @@ class TestReadingALog:
             "secret ['a'] : {s}",
             "db.passwd (prod) = {s}",
             "AUTHORIZATION_HEADER\t=\t{s}",
+            "session_token={s}",
+            "auth.token: {s}",
+            '{{"token": "{s}"}}',
+            "Cookie: sessionid={s}",
+            "Set-Cookie: a=b; {s}",
+            "credential = {s}",
+            "GOOGLE_APPLICATION_CREDENTIALS: {s}",
+            "private_key: {s}",
+            "token: PermissionError: {s}",
         ],
     )
     def test_no_value_syntax_lets_a_secret_survive_the_screen_after_a_credential_name(self, template: str) -> None:
@@ -1937,6 +1972,53 @@ class TestReadingALog:
         assert [line for line in report.splitlines() if line.startswith("Result:")] == [
             "Result: 1 problem found. Fix the first FAIL above, then run `usagedash doctor` again."
         ]
+
+    @pytest.mark.parametrize(
+        ("line", "screened"),
+        [
+            ("https://user:hunter2@localhost:8787/path", "https://<redacted>@localhost:8787/path"),
+            ("postgres://admin:S3cr3t@db.internal/app", "postgres://<redacted>@db.internal/app"),
+            ("https://user@localhost/path", "https://user@localhost/path"),
+            ("see https://example.com/path:with:colons", "see https://example.com/path:with:colons"),
+        ],
+    )
+    def test_the_user_and_password_in_a_url_are_replaced_and_an_ordinary_url_is_not(
+        self, line: str, screened: str
+    ) -> None:
+        assert doctor.screen_for_sharing(line) == screened
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "cannot read access-token: PermissionError",
+            "cannot read access-token: PermissionError  ",
+            "token: FileNotFoundError",
+            "credential: usagedash.errors.ConfigError",
+            "secret: SomeOtherException",
+        ],
+    )
+    def test_a_line_whose_whole_remainder_is_a_bare_exception_type_is_left_readable(self, line: str) -> None:
+        assert doctor.screen_for_sharing(line) == line
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "token: PermissionError: S3cr3tValue",
+            "token: PermissionError and S3cr3tValue",
+            "token: S3cr3tValueError",
+            "token: s3cr3tError",
+            "token: PermissionErrors",
+            "token: Error42",
+            "token: lowercaseError",
+            "token: pkg.s3cr3t.Error",
+        ],
+    )
+    def test_the_exemption_does_not_reach_anything_that_is_not_exactly_a_type_name_and_nothing_else(
+        self, line: str
+    ) -> None:
+        screened = doctor.screen_for_sharing(line)
+
+        assert screened == "token: <redacted>"
 
     def test_a_credential_name_up_to_64_characters_before_its_separator_is_matched_and_one_more_is_not(self) -> None:
         within = "password" + " a" * 32 + "=v"

@@ -181,13 +181,17 @@ _BEARER_VALUE = re.compile(r"(?i)\bbearer[ \t]+\S+")
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"""(?ix)
     (
-        (?:authorization|api[_-]?key|secret|password|passwd)   # a credential name, inside any longer name
+        (?:authorization|api[_-]?key|secret|password|passwd|token|cookie|credential|private[_-]?key)
+                                                               # a credential name, inside any longer name
         [^=:\n]{0,64}                                          # what sits before the separator: [0], .value, a quote
-        [=:][ \t]*                                             # the separator
+        [=:]                                                   # the separator
     )
+    (?! [ \t]* (?-i: (?:[A-Za-z_]\w*\.)* [A-Z][A-Za-z]*(?:Error|Exception) ) [ \t]* $ )   # unless only a type follows
+    ([ \t]*)                                                   # the spacing, kept
     .*                                                         # the rest of the line, whatever its syntax
     """
 )
+_URL_CREDENTIALS = re.compile(r"\b([A-Za-z][A-Za-z0-9+.-]*://)[^/\s:@]*:[^/\s@]*@")
 _TOKEN_LIKE = re.compile(r"[A-Za-z0-9_+=-]{32,}")
 REDACTED = "<redacted>"
 
@@ -206,20 +210,25 @@ def _screen_line(line: str) -> str:
 
     The server and the launchd capture hold no credentials by design, but a crash before logging starts can put
     anything Python printed into the capture. This is a net, not a promise: it removes email addresses, a value
-    after ``Bearer``, any run of 32 or more token characters, and, after a name that holds ``authorization``,
-    ``api_key``, ``secret``, ``password``, or ``passwd`` and up to 64 characters of anything but a separator
-    (a prefix such as ``DB_``, a quote, ``[0]``, ``.value``) and then ``=`` or ``:``, the rest of the line.
+    after ``Bearer``, the user and password in ``scheme://user:password@host``, any run of 32 or more token
+    characters, and, after a name that holds ``authorization``, ``api_key``, ``secret``, ``password``,
+    ``passwd``, ``token``, ``cookie``, ``credential``, or ``private_key`` and up to 64 characters of anything
+    but a separator (a prefix such as ``DB_``, a quote, ``[0]``, ``.value``) and then ``=`` or ``:``, the rest
+    of the line.
 
     The rest of the line goes whatever it looks like, and the name's own shape is not modelled either. A screen
     that models the value's or the name's syntax is bypassed by the next syntax (a scheme and a credential, an
     escaped quote, a comma inside the value, an index on the name), so none is modelled. What that costs is
     the remainder of such a line, and what it does not see is a value printed on a later line than its name.
 
-    A word such as ``token`` alone is left, so that ``cannot read access-token: PermissionError`` still says
-    what it says. Nothing here may be cited as a guarantee that the output holds no credential.
+    One exemption keeps a diagnosis readable: when everything after the separator is a bare exception type, as
+    in ``cannot read access-token: PermissionError``, nothing is replaced, because a type name is not a value.
+    A credential printed under a name that holds none of the words above passes. Nothing here may be cited as a
+    guarantee that the output holds no credential.
     """
     screened = _BEARER_VALUE.sub(f"Bearer {REDACTED}", line)
-    screened = _CREDENTIAL_ASSIGNMENT.sub(lambda match: f"{match.group(1)}{REDACTED}", screened)
+    screened = _CREDENTIAL_ASSIGNMENT.sub(lambda match: f"{match.group(1)}{match.group(2)}{REDACTED}", screened)
+    screened = _URL_CREDENTIALS.sub(lambda match: f"{match.group(1)}{REDACTED}@", screened)
     screened = _EMAIL_ADDRESS.sub("<email>", screened)
     return _TOKEN_LIKE.sub(REDACTED, screened)
 
@@ -414,10 +423,14 @@ def vendor_findings(settings: Settings, agent_path: str) -> list[Finding]:
     """Report how the agent would find each vendor CLI, by the resolution it uses when it starts one.
 
     ``agent_path`` is the PATH the agent runs with. A missing CLI is information: its cards just stay empty.
+
+    A relative PATH entry is resolved from the directory this command runs in, as ``agent install`` resolves one
+    from the shell that runs it. The agent's recorded PATH holds only absolute directories, so for it the
+    directory makes no difference; for this shell's PATH, when nothing is installed, it is the whole answer.
     """
     binaries = settings.binaries
     return [
-        _vendor_finding(name, executable, agent_path, settings.data_dir)
+        _vendor_finding(name, executable, agent_path, Path.cwd())
         for name, executable in (("claude", binaries.claude), ("codex", binaries.codex), ("grok", binaries.grok))
     ]
 

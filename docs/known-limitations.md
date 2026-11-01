@@ -128,10 +128,15 @@ not running at all and something else answers.
   logs when something fails, because users paste the output into issues. The server logs error types and
   route templates, never account ids or credentials, but a crash before logging starts can put a Python
   traceback in `launchd-stderr.log`. Each line is screened first (`doctor.screen_for_sharing`): email
-  addresses, a value after `Bearer`, and any run of 32 or more token characters are replaced, and after
-  a name that holds `authorization`, `api_key`, `secret`, `password`, or `passwd` (followed by up to 64
-  characters of anything but a separator, so `DB_PASSWORD`, `password[0]`, and a quoted name all match)
-  and its `=` or `:`, **the rest of the line** is replaced. The same screen runs over the whole report,
+  addresses, a value after `Bearer`, the user and password of a `scheme://user:password@` address, and
+  any run of 32 or more token characters are replaced, and after a name that holds `authorization`,
+  `api_key`, `secret`, `password`, `passwd`, `token`, `cookie`, `credential`, or `private_key` (followed
+  by up to 64 characters of anything but a separator, so `DB_PASSWORD`, `password[0]`, and a quoted name
+  all match) and its `=` or `:`, **the rest of the line** is replaced. One remainder is left readable: a
+  line whose whole remainder is an exception or error type name such as `TokenExpiredError`, because a
+  traceback's last line is the most useful line of a crash and a type name is not a value. The match for
+  that name is case-sensitive and anchored at the end of the line, so `token: AbcError extra` is still
+  replaced. The same screen runs over the whole report,
   not only the log lines, because the report also echoes settings values and paths. Neither the value's
   syntax nor the name's shape is modelled: a screen that parses either is bypassed by the next syntax (a
   scheme and a credential, an escaped quote, a comma inside the value, an index on the name). The cost is

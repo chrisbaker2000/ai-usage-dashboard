@@ -77,26 +77,74 @@ class TestEveryPromptIsPresentAndForbidsTheDangerousThings:
         assert "deleting them is my choice" in text
 
 
+def verification(git: str) -> str:
+    """The exact sentence that verifies an existing checkout, for ``git`` as the prompt spells the command."""
+    return (
+        f"verify it before anything else: `{git} remote get-url origin` must print {REPOSITORY_ADDRESS} "
+        f"(or the same address without .git), `{git} status --porcelain` must print nothing, and after "
+        f"`{git} fetch origin main`, `{git} merge-base --is-ancestor HEAD origin/main` must exit 0, which means "
+        "the checkout holds no commit that is not on the repository's main branch. If any of the three fails, "
+        "stop and tell me, and do not pull, sync, or run anything from that folder. Otherwise run "
+        f"`{git} merge --ff-only origin/main`"
+    )
+
+
+CHECKOUT_RULES = {
+    "install": (verification("git -C ~/Developer/ai-usage-dashboard"), "uv sync"),
+    "update": (verification("git"), "Run `uv sync`"),
+}
+
+
 class TestTheInstallAndUpdatePromptsRunOnlyTheRightCheckout:
-    @pytest.mark.parametrize("name", ["install", "update"])
-    def test_an_existing_checkout_is_verified_in_order_before_anything_is_pulled_or_run(self, name: str) -> None:
+    """The whole sentence is asserted, not its keywords: "do not check first" contains every keyword."""
+
+    @pytest.mark.parametrize("name", CHECKOUT_RULES)
+    def test_an_existing_checkout_is_verified_with_the_exact_checks_before_anything_is_merged_or_run(
+        self, name: str
+    ) -> None:
+        text = prompt_starting(PROMPT_STARTS[name])
+        sentence, after = CHECKOUT_RULES[name]
+
+        assert sentence in text
+        assert text.index(sentence) < text.index(after)
+
+    @pytest.mark.parametrize("name", CHECKOUT_RULES)
+    def test_the_checks_cover_the_remote_the_clean_tree_and_commits_beyond_main(self, name: str) -> None:
+        sentence, _ = CHECKOUT_RULES[name]
+
+        for required in ("remote get-url origin", "status --porcelain", "merge-base --is-ancestor HEAD origin/main"):
+            assert required in sentence
+        assert REPOSITORY_ADDRESS in sentence
+
+    @pytest.mark.parametrize("name", CHECKOUT_RULES)
+    def test_nothing_is_pulled_and_the_only_merge_is_a_fast_forward_of_origin_main(self, name: str) -> None:
         text = prompt_starting(PROMPT_STARTS[name])
 
-        steps = [
-            "remote get-url origin",
-            "status --porcelain",
-            "If either check fails, stop and tell me, and do not pull, sync, or run anything from that folder",
-            "git pull --ff-only",
-            "uv sync",
-        ]
-        positions = [text.index(step) for step in steps]
-        assert positions == sorted(positions)
-        assert REPOSITORY_ADDRESS in text
-        assert "prints nothing" in text
+        assert "git pull" not in text
+        assert re.findall(r"merge (--[a-z-]+) ", text) == ["--ff-only"]
 
-    @pytest.mark.parametrize("name", ["install", "update"])
-    def test_a_plain_pull_that_would_merge_is_never_used(self, name: str) -> None:
-        assert not re.search(r"git pull(?! --ff-only)", prompt_starting(PROMPT_STARTS[name]))
+    @pytest.mark.parametrize("name", CHECKOUT_RULES)
+    @pytest.mark.parametrize(
+        ("original", "weakened"),
+        [
+            ("must print nothing", "may print anything"),
+            ("must exit 0", "may exit 1"),
+            ("stop and tell me, and do not pull", "continue, and pull"),
+            ("Otherwise run", "Whatever the result, run"),
+            ("verify it before anything else", "verify it afterwards"),
+        ],
+    )
+    def test_a_weakened_or_reversed_rule_is_not_accepted_as_the_verification(
+        self, name: str, original: str, weakened: str
+    ) -> None:
+        sentence, _ = CHECKOUT_RULES[name]
+        text = prompt_starting(PROMPT_STARTS[name])
+        assert original in sentence
+
+        mutated = text.replace(original, weakened)
+
+        assert mutated != text
+        assert sentence not in mutated
 
 
 class TestTheInstallAndUpdatePromptsDoNotTrustAnExitStatusAlone:

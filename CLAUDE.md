@@ -218,6 +218,13 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   runs 224 combinations of launchd outcome, property-list state, shell settings, health result, and
   holder; re-introducing either rule's bug fails it on exactly its own cases. Log lines are screened
   before they are printed (`doctor.screen_for_sharing`) because the output is meant to be pasted publicly.
+  The names are `authorization`, `api_key`, `secret`, `password`, `passwd`, `token`, `cookie`,
+  `credential`, `private_key`; `scheme://user:password@` userinfo is replaced too
+  (`doctor._URL_CREDENTIALS`). The one remainder left readable is a bare exception or error type name
+  alone on the rest of the line (`TokenExpiredError`), matched case-sensitively through a scoped
+  `(?-i:...)` group and anchored at the end of the line, so a traceback's last line survives and
+  `token: AbcError extra` does not. The exemption is a lookahead placed right after the separator, with the
+  spacing a group of its own: optional trailing spaces otherwise backtrack to zero and defeat it.
   After a credential-looking name the whole rest of the line is replaced and neither the value's syntax nor
   the name's shape is parsed (the name may be followed by up to 64 characters before its separator, so
   `password[0]=` and `DB_PASSWORD=` both match): three review rounds in a row found a syntax the previous
