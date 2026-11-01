@@ -456,9 +456,10 @@ The usual causes, by what you see:
 - **The browser shows the page from before an update.** Run `open` again. A reload keeps the old copy.
 
 If doctor does not point at the cause, open an issue with the bug template and paste doctor's whole
-output. It shows your home folder as `~` and holds no tokens, but read it first and remove anything
-you would not share. Never paste `open-dashboard.html`, the access token, session files, or keychain
-contents.
+output. It shows your home folder as `~` and replaces email addresses and text that looks like a
+credential in the log lines it quotes, but that screen is a net and not a guarantee, so read the
+output first and remove anything you would not share. Never paste `open-dashboard.html`, the access
+token, session files, or keychain contents.
 
 ## Security
 

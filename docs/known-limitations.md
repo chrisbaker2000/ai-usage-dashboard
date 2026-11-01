@@ -126,10 +126,13 @@ not running at all and something else answers.
   logs when something fails, because users paste the output into issues. The server logs error types and
   route templates, never account ids or credentials, but a crash before logging starts can put a Python
   traceback in `launchd-stderr.log`. Each line is screened first (`doctor.screen_for_sharing`): email
-  addresses, a value after `Bearer` or after an `authorization`, `api_key`, `secret`, or `password`
-  assignment, and any run of 32 or more token characters are replaced. The net is deliberately narrow so
-  that ordinary diagnostic text stays readable, so something that looks like none of those passes. The
-  home folder is shown as `~`, and the README tells users to read the output before posting it.
+  addresses, a value after `Bearer`, the value of an assignment whose name holds `authorization`,
+  `api_key`, `secret`, `password`, or `passwd` (with any prefix or suffix such as `DB_PASSWORD`, and with
+  or without quotes, as in JSON), and any run of 32 or more token characters are replaced. The net is
+  deliberately narrow so that ordinary diagnostic text stays readable, so a short credential under
+  another name passes. Nothing user-facing promises that the output holds no credential: the home
+  folder is shown as `~`, and the README and the bug template tell users to read the output before
+  posting it.
 
 ## The retail API cost uses the short-prompt standard rate
 

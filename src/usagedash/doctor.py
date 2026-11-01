@@ -169,7 +169,15 @@ def _loopback_holder(output: str) -> PortHolder | None:
 
 _EMAIL_ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _BEARER_VALUE = re.compile(r"(?i)\bbearer\s+\S+")
-_CREDENTIAL_ASSIGNMENT = re.compile(r"(?i)\b(authorization|api[_-]?key|secret|password|passwd)\b(\s*[=:]\s*)\S+")
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"""(?ix)
+    (
+        [\w-]*(?:authorization|api[_-]?key|secret|password|passwd)[\w-]*   # the name, with any prefix or suffix
+        ["']?\s*[=:]\s*                                                    # a closing quote and the separator
+    )
+    (?: "[^"]*" | '[^']*' | [^\s"',}]+ )                                   # the value, quoted or not
+    """
+)
 _TOKEN_LIKE = re.compile(r"[A-Za-z0-9_+=-]{32,}")
 REDACTED = "<redacted>"
 
@@ -179,12 +187,14 @@ def screen_for_sharing(line: str) -> str:
 
     The server and the launchd capture hold no credentials by design, but a crash before logging starts can put
     anything Python printed into the capture. This is a net, not a promise: it removes email addresses, a value
-    after ``Bearer`` or after an ``authorization``, ``api_key``, ``secret``, or ``password`` assignment, and any
-    run of 32 or more token characters. A word such as ``token`` alone is left, so that ``cannot read
-    access-token: PermissionError`` still says what it says.
+    after ``Bearer``, the value of an assignment whose name holds ``authorization``, ``api_key``, ``secret``,
+    ``password``, or ``passwd`` (with any prefix or suffix, such as ``DB_PASSWORD``, and with or without quotes
+    around the name or the value, as in JSON), and any run of 32 or more token characters. A word such as
+    ``token`` alone is left, so that ``cannot read access-token: PermissionError`` still says what it says.
+    Nothing here may be cited as a guarantee that the output holds no credential.
     """
     screened = _BEARER_VALUE.sub(f"Bearer {REDACTED}", line)
-    screened = _CREDENTIAL_ASSIGNMENT.sub(lambda match: f"{match.group(1)}{match.group(2)}{REDACTED}", screened)
+    screened = _CREDENTIAL_ASSIGNMENT.sub(lambda match: f"{match.group(1)}{REDACTED}", screened)
     screened = _EMAIL_ADDRESS.sub("<email>", screened)
     return _TOKEN_LIKE.sub(REDACTED, screened)
 

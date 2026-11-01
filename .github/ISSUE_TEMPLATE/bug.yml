@@ -24,7 +24,8 @@ body:
       label: Output of `usagedash doctor`
       description: >-
         Run `.venv/bin/usagedash doctor` from the repository folder and paste all of it. It shows your home folder as
-        `~` and holds no tokens, but read it before posting and remove anything you would not share.
+        `~` and screens email addresses and credential-looking text out of the log lines, but that screen is not a
+        guarantee: read it before posting and remove anything you would not share.
       render: text
     validations:
       required: false
