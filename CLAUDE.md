@@ -245,7 +245,14 @@ ValidError` passing it, because a type name cannot be told from a value by its s
   showed a 70-character name passing it): four review rounds in a row found a syntax the previous
   patch missed (a scheme plus a credential, an escaped quote, an index on the name, a long name). A log
   line longer than the window is reported as too long, never shown cut (`doctor.tail_lines`): the cut end
-  may have lost the credential name that says its value is one. Untrusted text is split on `\n` only
+  may have lost the credential name that says its value is one. The screen reads no line longer than
+  `MAX_SCREENED_LINE_CHARACTERS` (4096): it is replaced whole by a note of its length. Six of sixteen
+  adversarial shapes were quadratic (the credential-name, email, URL-userinfo, and scheme patterns each
+  rescan from every start), and bounding the input is the close for the class; rewriting four patterns would
+  only wait for the fifth. The test is clock-free: every shape one character over the cap must be the note.
+  The agent snapshot has a boundary around each of its two reads (the property list, launchd), so an
+  unexpected error in one neither skips the other nor replaces the earlier, more specific finding, and one
+  around the whole (`_agent_view`). Untrusted text is split on `\n` only
   (`tail_lines`, `_loopback_holder`), never with `str.splitlines`, which also splits on `\v`, `\f`, the
   `\x1c`-`\x1e` separators, `\x85`, and U+2028/9 and so put `password=` and its value on different
   "lines" before the screen saw them. The data directory is checked for who can look at it as well as who

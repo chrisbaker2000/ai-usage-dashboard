@@ -180,7 +180,10 @@ not running at all and something else answers.
   `/usr/local/bin/1password-mcp:` is replaced too, because that path holds the word `password`. A log
   line longer than the window `doctor` reads (8 KiB) is reported as too long, with the path of the log,
   and not shown, because the cut end of a line may have lost the name that says its value is a credential.
-  Two things pass: a short credential printed under a name that holds none of those words, and a value
+  A line of more than 4096 characters, in a log or in any field of the report, is replaced whole by a note
+  of its length and is not read at all, for the same reason and because several of the screen's patterns
+  cost the square of a line's length (about two seconds at 48,000 characters before the cap). Two things
+  pass: a short credential printed under a name that holds none of those words, and a value
   printed on a later line than its name. Nothing user-facing promises that the output holds no
   credential: the home folder is shown as `~`, and the README and the bug template tell users to read the
   output before posting it.

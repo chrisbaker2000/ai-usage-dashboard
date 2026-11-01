@@ -2965,9 +2965,80 @@ class TestReadingALog:
         assert "hunter2" not in doctor.screen_for_sharing(line)
 
     def test_a_line_with_many_credential_words_and_no_separator_is_left_alone(self) -> None:
-        line = "token " * 2000
+        line = "token " * 600
 
+        assert len(line) < doctor.MAX_SCREENED_LINE_CHARACTERS
         assert doctor.screen_for_sharing(line) == line
+
+    def test_a_line_exactly_as_long_as_the_cap_is_screened_like_any_other(self) -> None:
+        line = "password=hunter2" + "x" * (doctor.MAX_SCREENED_LINE_CHARACTERS - len("password=hunter2"))
+
+        assert len(line) == doctor.MAX_SCREENED_LINE_CHARACTERS
+        assert doctor.screen_for_sharing(line) == "password=<redacted>"
+
+    def test_a_line_one_character_over_the_cap_is_replaced_whole_by_a_note_of_its_length(self) -> None:
+        limit = doctor.MAX_SCREENED_LINE_CHARACTERS
+        line = "password=hunter2" + "x" * (limit + 1 - len("password=hunter2"))
+
+        screened = doctor.screen_for_sharing(line)
+
+        assert screened == f"({limit + 1} characters, too long to screen, so not shown)"
+        assert "hunter2" not in screened
+
+    def test_only_the_long_line_is_replaced_and_the_lines_around_it_are_screened_and_kept_in_place(self) -> None:
+        long = "a" * (doctor.MAX_SCREENED_LINE_CHARACTERS + 5)
+
+        screened = doctor.screen_for_sharing(f"password=hunter2\n{long}\ntoken: abc")
+
+        assert screened.split("\n") == [
+            "password=<redacted>",
+            f"({len(long)} characters, too long to screen, so not shown)",
+            "token: <redacted>",
+        ]
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            "token ",
+            "a",
+            "a.",
+            "a://",
+            "a:",
+            "bearer ",
+            "a1",
+            "=",
+            "password ",
+            "a@",
+            "a.b-c+d",
+            "/",
+            "?",
+        ],
+    )
+    def test_every_adversarial_shape_over_the_cap_is_a_note_and_never_reaches_a_pattern(self, shape: str) -> None:
+        limit = doctor.MAX_SCREENED_LINE_CHARACTERS
+        line = shape * (limit // len(shape) + 2)
+        assert len(line) > limit
+
+        assert doctor.screen_for_sharing(line) == f"({len(line)} characters, too long to screen, so not shown)"
+
+    def test_a_log_line_over_the_cap_that_fits_the_read_window_is_a_note_in_the_tail(self, tmp_path: Path) -> None:
+        log = tmp_path / "log"
+        log.write_text("first\n" + "a" * (doctor.MAX_SCREENED_LINE_CHARACTERS + 10) + "\nlast\n")
+
+        shown = doctor.tail_lines(log, max_bytes=2 * doctor.MAX_SCREENED_LINE_CHARACTERS)
+
+        assert shown is not None
+        assert [line for line in shown if "too long to screen" in line]
+        assert shown[0] == "first"
+        assert shown[-1] == "last"
+
+    def test_a_report_field_over_the_cap_is_a_note_in_the_report(self, tmp_path: Path) -> None:
+        field = "password=hunter2 " + "x" * (doctor.MAX_SCREENED_LINE_CHARACTERS + 10)
+
+        report = doctor.render([Finding(Level.WARN, "a long detail", (field,), None)], tmp_path)
+
+        assert "too long to screen, so not shown" in report
+        assert "hunter2" not in report
 
     def test_a_sentence_that_only_mentions_a_credential_name_far_from_any_separator_is_left_alone(self) -> None:
         line = "the password field is described in the long help text that follows and ends here without a separator"
@@ -3350,7 +3421,9 @@ class TestNoFailureAlwaysMeansTheDashboardWasChecked:
 
 
 class TestAnUnexpectedErrorNeverEndsTheReport:
-    @pytest.mark.parametrize("function", ["installed_environment", "service_state"])
+    @pytest.mark.parametrize(
+        ("function", "what"), [("installed_environment", "property list"), ("service_state", "launchd")]
+    )
     def test_an_error_asking_about_the_agent_is_a_failure_naming_its_type_and_the_other_checks_still_run(
         self,
         tmp_path: Path,
@@ -3358,6 +3431,7 @@ class TestAnUnexpectedErrorNeverEndsTheReport:
         machine: Machine,
         monkeypatch: pytest.MonkeyPatch,
         function: str,
+        what: str,
     ) -> None:
         def explode(_paths: agent.AgentPaths) -> object:
             raise RuntimeError("password=hunter2")
@@ -3367,13 +3441,60 @@ class TestAnUnexpectedErrorNeverEndsTheReport:
 
         findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=settings_for(tmp_path))
 
-        [failure] = [found for found in findings if "The agent check could not finish" in found.title]
+        [failure] = [found for found in findings if f"The {what} check could not finish" in found.title]
         assert failure.level is Level.FAIL
-        assert failure.title == "The agent check could not finish: RuntimeError"
+        assert failure.title == f"The {what} check could not finish: RuntimeError"
         assert failure.details == ("Every other check ran.",)
         assert "hunter2" not in repr(findings)
         assert any(title.startswith("Settings load") for title in titles(findings))
         assert any("data directory" in title for title in titles(findings))
+
+    def test_an_unexpected_error_reading_the_property_list_does_not_stop_launchd_from_being_asked(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def explode(_paths: agent.AgentPaths) -> object:
+            raise RuntimeError("synthetic")
+
+        machine.running()
+        monkeypatch.setattr(agent, "installed_environment", explode)
+
+        findings = doctor.diagnose_agent(paths, None)
+
+        assert titles(findings, Level.FAIL) == ["The property list check could not finish: RuntimeError"]
+        assert "launchd is running the agent (pid 838)" in titles(findings)
+        assert not [title for title in titles(findings) if "property list is gone" in title]
+
+    def test_a_specific_property_list_failure_is_kept_when_launchd_then_fails_unexpectedly(
+        self, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def untrusted(_paths: agent.AgentPaths) -> object:
+            raise ConfigError("the property list is writable by another account")
+
+        def explode(_paths: agent.AgentPaths) -> object:
+            raise RuntimeError("synthetic")
+
+        monkeypatch.setattr(agent, "installed_environment", untrusted)
+        monkeypatch.setattr(agent, "service_state", explode)
+
+        findings = doctor.diagnose_agent(paths, None)
+
+        assert titles(findings, Level.FAIL) == [
+            "The installed property list cannot be trusted: the property list is writable by another account",
+            "The launchd check could not finish: RuntimeError",
+        ]
+
+    def test_the_whole_agent_snapshot_is_still_guarded_for_what_neither_read_covers(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def explode(_paths: agent.AgentPaths) -> object:
+            raise RuntimeError("password=hunter2")
+
+        monkeypatch.setattr(doctor, "_agent_findings", explode)
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=settings_for(tmp_path))
+
+        assert "The agent check could not finish: RuntimeError" in titles(findings, Level.FAIL)
+        assert "hunter2" not in repr(findings)
 
     def test_a_failed_agent_check_is_unknown_and_not_nothing_installed_so_this_shells_settings_do_not_stand_in(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
@@ -3385,7 +3506,7 @@ class TestAnUnexpectedErrorNeverEndsTheReport:
 
         findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
 
-        assert titles(findings, Level.FAIL) == ["The agent check could not finish: RuntimeError"]
+        assert titles(findings, Level.FAIL) == ["The launchd check could not finish: RuntimeError"]
         assert not [title for title in titles(findings) if title.startswith(("claude:", "codex:", "grok:"))]
         assert not [title for title in titles(findings) if "data directory" in title]
 
@@ -3399,7 +3520,7 @@ class TestAnUnexpectedErrorNeverEndsTheReport:
 
         findings = doctor.diagnose_agent(paths, PORT)
 
-        assert "The agent check could not finish: RuntimeError" in titles(findings, Level.FAIL)
+        assert "The launchd check could not finish: RuntimeError" in titles(findings, Level.FAIL)
         assert "hunter2" not in repr(findings)
 
     @pytest.mark.parametrize(

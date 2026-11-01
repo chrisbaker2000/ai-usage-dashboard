@@ -208,6 +208,11 @@ which is where the host starts, so an ``@`` inside the user or the password does
 colon must come before that ``@``: ``scheme://user@host:8080`` has a user and no password and is left alone."""
 _TOKEN_LIKE = re.compile(r"[A-Za-z0-9_+=-]{32,}")
 REDACTED = "<redacted>"
+MAX_SCREENED_LINE_CHARACTERS = 4096
+"""The longest line the screen reads. Several of its patterns rescan from every start position, so their cost
+grows with the square of a line's length (measured: 2.4 s at 48,000 characters for a line of repeated credential
+words, 7 s for a run of letters). A real log line, path, or message is a few hundred characters, so a longer one
+is not read at all, and the cost is bounded whatever the next pattern does."""
 
 
 def screen_for_sharing(text: str) -> str:
@@ -241,7 +246,13 @@ def _screen_line(line: str) -> str:
     likely a password as anything else, and a type name cannot be told from a value by its shape. A credential
     printed under a name that holds none of the words above passes. Nothing here may be cited as a guarantee
     that the output holds no credential.
+
+    A line longer than ``MAX_SCREENED_LINE_CHARACTERS`` is replaced whole by a note of its length: it is not
+    cut, because the cut end of a line may have lost the credential name that says its value is one, and it is
+    not read, because the cost of the patterns below grows with the square of the length.
     """
+    if len(line) > MAX_SCREENED_LINE_CHARACTERS:
+        return f"({len(line)} characters, too long to screen, so not shown)"
     screened = _BEARER_VALUE.sub(f"Bearer {REDACTED}", line)
     screened = _CREDENTIAL_ASSIGNMENT.sub(lambda match: f"{match.group(1)}{match.group(2)}{REDACTED}", screened)
     screened = _URL_CREDENTIALS.sub(lambda match: f"{match.group(1)}{REDACTED}@", screened)
@@ -811,6 +822,9 @@ def _agent_findings(paths: AgentPaths) -> AgentView:
                 fix=_RECOVER_THE_PROPERTY_LIST,
             )
         )
+    except Exception as error:  # noqa: BLE001 - one read's boundary, so the other read still runs; see ``_guarded``
+        plist_untrusted = True
+        findings.append(_check_failure("property list", error))
     try:
         state = agent.service_state(paths)
     except UsageDashError as error:
@@ -821,6 +835,9 @@ def _agent_findings(paths: AgentPaths) -> AgentView:
                 fix="Check that `/bin/launchctl` runs in this terminal, then run `usagedash doctor` again.",
             )
         )
+        return AgentView(findings, None, installed, AgentStatus.UNKNOWN)
+    except Exception as error:  # noqa: BLE001 - one read's boundary, keeping what the first read found
+        findings.append(_check_failure("launchd", error))
         return AgentView(findings, None, installed, AgentStatus.UNKNOWN)
     install_fix = "Run `usagedash agent install` from the repository directory."
     if state is None:
