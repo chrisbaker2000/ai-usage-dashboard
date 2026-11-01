@@ -1857,6 +1857,12 @@ class TestReadingALog:
             '"secret" : "{s}"',
             "api-key = 'one' 'two' {s}",
             "passwd={s} trailing words",
+            "password[0]={s}",
+            "password.value={s}",
+            'config["password"][0] = "{s}"',
+            "secret ['a'] : {s}",
+            "db.passwd (prod) = {s}",
+            "AUTHORIZATION_HEADER\t=\t{s}",
         ],
     )
     def test_no_value_syntax_lets_a_secret_survive_the_screen_after_a_credential_name(self, template: str) -> None:
@@ -1866,6 +1872,55 @@ class TestReadingALog:
 
         assert secret not in screened
         assert doctor.REDACTED in screened
+
+    def test_a_credential_name_up_to_64_characters_before_its_separator_is_matched_and_one_more_is_not(self) -> None:
+        within = "password" + " a" * 32 + "=v"
+        beyond = "password" + " a" * 32 + " =v"
+
+        assert doctor.screen_for_sharing(within) == "password" + " a" * 32 + "=<redacted>"
+        assert doctor.screen_for_sharing(beyond) == beyond
+
+    def test_a_sentence_that_only_mentions_a_credential_name_far_from_any_separator_is_left_alone(self) -> None:
+        line = "the password field is described in the long help text that follows and ends here without a separator"
+
+        assert doctor.screen_for_sharing(line) == line
+
+    def test_the_whole_report_is_screened_not_only_the_log_lines(self, tmp_path: Path) -> None:
+        finding = Finding(
+            Level.WARN,
+            f"claude: cannot use {tmp_path}/owner@example.com/bin",
+            ("port must be an integer, got 'password=hunter2'",),
+        )
+
+        report = doctor.render([finding], tmp_path)
+
+        assert "owner@example.com" not in report
+        assert "hunter2" not in report
+        assert "<email>" in report
+        assert "password=<redacted>" in report
+
+    def test_the_failure_report_after_an_install_is_screened_too(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        machine.health = HealthResult(HealthKind.ANSWERED, 404)
+        machine.holder = PortHolder(77, "owner@example.com")
+
+        report = doctor.render_agent_failure(paths, PORT, tmp_path)
+
+        assert "owner@example.com" not in report
+        assert f"Port {PORT} is held by <email> (pid 77)." in report
+
+    def test_a_settings_error_that_echoes_an_email_address_does_not_reach_the_pasted_output(
+        self, home: Path, machine: Machine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        machine.nothing_installed()
+        monkeypatch.setenv("USAGEDASH_PORT", "owner@example.com")
+
+        assert cli.main(["doctor"]) == cli.EXIT_FAILURE
+
+        output = capsys.readouterr().out
+        assert "owner@example.com" not in output
+        assert "port must be an integer, got '<email>'" in output
 
 
 class TestFindingWhoHoldsAPort:
@@ -2248,6 +2303,25 @@ class TestWaitingForTheNewAgent:
 
         assert self.wait(paths, clock) is False
         assert clock.now == cli.INSTALL_READY_WAIT_SECONDS
+
+    def test_no_probe_starts_after_the_deadline_when_the_launchd_question_is_what_crossed_it(
+        self,
+        paths: agent.AgentPaths,
+        machine: Machine,
+        clock: "TestWaitingForTheNewAgent.Clock",
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        asked = self.answers(monkeypatch, False)
+
+        def slow_question(_paths: agent.AgentPaths) -> agent.ServiceState | None:
+            clock.now += cli.INSTALL_READY_WAIT_SECONDS + 5
+            return RUNNING
+
+        monkeypatch.setattr(agent, "service_state", slow_question)
+
+        assert self.wait(paths, clock) is False
+        assert len(asked) == 1
+        assert clock.sleeps == []
 
     def test_an_agent_whose_run_already_failed_ends_the_wait_at_once(
         self,

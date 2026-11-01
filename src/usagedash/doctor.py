@@ -172,10 +172,11 @@ _BEARER_VALUE = re.compile(r"(?i)\bbearer\s+\S+")
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"""(?ix)
     (
-        [\w-]*(?:authorization|api[_-]?key|secret|password|passwd)[\w-]*   # the name, with any prefix or suffix
-        ["']?\s*[=:]\s*                                                    # a closing quote and the separator
+        (?:authorization|api[_-]?key|secret|password|passwd)   # a credential name, inside any longer name
+        [^=:\n]{0,64}                                          # what sits before the separator: [0], .value, a quote
+        [=:]\s*                                                # the separator
     )
-    .*                                                                     # the rest of the line, whatever its syntax
+    .*                                                         # the rest of the line, whatever its syntax
     """
 )
 _TOKEN_LIKE = re.compile(r"[A-Za-z0-9_+=-]{32,}")
@@ -188,15 +189,16 @@ def screen_for_sharing(line: str) -> str:
     The server and the launchd capture hold no credentials by design, but a crash before logging starts can put
     anything Python printed into the capture. This is a net, not a promise: it removes email addresses, a value
     after ``Bearer``, any run of 32 or more token characters, and, after a name that holds ``authorization``,
-    ``api_key``, ``secret``, ``password``, or ``passwd`` (with any prefix or suffix, such as ``DB_PASSWORD``,
-    and with or without quotes around it) and its ``=`` or ``:``, the rest of the line.
+    ``api_key``, ``secret``, ``password``, or ``passwd`` and up to 64 characters of anything but a separator
+    (a prefix such as ``DB_``, a quote, ``[0]``, ``.value``) and then ``=`` or ``:``, the rest of the line.
 
-    The rest of the line goes whatever it looks like. A screen that models the value's syntax is bypassed by
-    the next syntax (a scheme and a credential, an escaped quote, a comma inside the value), so none is
-    modelled. What that costs is the remainder of such a line, and what it does not see is a value printed on
-    a later line than its name. A word such as ``token`` alone is left, so that ``cannot read access-token:
-    PermissionError`` still says what it says. Nothing here may be cited as a guarantee that the output
-    holds no credential.
+    The rest of the line goes whatever it looks like, and the name's own shape is not modelled either. A screen
+    that models the value's or the name's syntax is bypassed by the next syntax (a scheme and a credential, an
+    escaped quote, a comma inside the value, an index on the name), so none is modelled. What that costs is
+    the remainder of such a line, and what it does not see is a value printed on a later line than its name.
+
+    A word such as ``token`` alone is left, so that ``cannot read access-token: PermissionError`` still says
+    what it says. Nothing here may be cited as a guarantee that the output holds no credential.
     """
     screened = _BEARER_VALUE.sub(f"Bearer {REDACTED}", line)
     screened = _CREDENTIAL_ASSIGNMENT.sub(lambda match: f"{match.group(1)}{REDACTED}", screened)
@@ -886,14 +888,24 @@ def _blocks(findings: Sequence[Finding]) -> str:
     return "\n".join(lines)
 
 
+def _shareable(text: str, home: Path) -> str:
+    """Screen the whole report, then show the home folder as ``~``, because users paste all of it into issues.
+
+    Log lines are screened as they are read, but the report also echoes what an invalid setting was set to and
+    the paths it names, and either can hold an email address or something that looks like a credential. The
+    screen is idempotent, so a line screened twice reads the same.
+    """
+    return abbreviate_home(screen_for_sharing(text), home)
+
+
 def render(findings: Sequence[Finding], home: Path) -> str:
-    """Format findings as plain text, one block each, ending in a verdict. The home folder is shown as ``~``."""
-    return abbreviate_home(f"{_blocks(findings)}\n\n{_verdict(findings)}", home)
+    """Format findings as plain text, one block each, ending in a verdict, ready to paste into an issue."""
+    return _shareable(f"{_blocks(findings)}\n\n{_verdict(findings)}", home)
 
 
 def render_agent_failure(paths: AgentPaths, port: int, home: Path) -> str:
     """Format the agent checks alone, for the message after an install that found nothing answering."""
-    return abbreviate_home(_blocks(diagnose_agent(paths, port)), home)
+    return _shareable(_blocks(diagnose_agent(paths, port)), home)
 
 
 def abbreviate_home(text: str, home: Path) -> str:

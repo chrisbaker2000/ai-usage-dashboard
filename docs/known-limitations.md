@@ -98,7 +98,9 @@ These designs were tried and withdrawn:
 
 ## What `agent install` and `usagedash doctor` can and cannot tell you
 
-`agent install` exits 0 when `GET /healthz` on the agent's port answers 200 within 20 seconds. That
+`agent install` exits 0 when `GET /healthz` on the agent's port answers 200 within about 20 seconds. No
+probe starts after the deadline, but a step already running is not cut short, so a slow health request
+(up to 2 seconds) or a slow `launchctl` call (up to its own 30-second limit) can run past it. That
 proves something answered the health check, not that the agent did. An older process still holding the
 port, such as a `usagedash serve` started by hand, answers it too. `usagedash doctor` compares the
 process holding the port with the agent's pid and reports a failure when they differ, or when the agent is
@@ -127,11 +129,13 @@ not running at all and something else answers.
   route templates, never account ids or credentials, but a crash before logging starts can put a Python
   traceback in `launchd-stderr.log`. Each line is screened first (`doctor.screen_for_sharing`): email
   addresses, a value after `Bearer`, and any run of 32 or more token characters are replaced, and after
-  a name that holds `authorization`, `api_key`, `secret`, `password`, or `passwd` (with any prefix or
-  suffix such as `DB_PASSWORD`, quoted or not) and its `=` or `:`, **the rest of the line** is replaced.
-  The value's own syntax is deliberately not modelled: a screen that parses values is bypassed by the
-  next syntax (a scheme and a credential, an escaped quote, a comma inside the value). The cost is the
-  remainder of such a line. Two things pass: a short credential printed under a name that holds none of
+  a name that holds `authorization`, `api_key`, `secret`, `password`, or `passwd` (followed by up to 64
+  characters of anything but a separator, so `DB_PASSWORD`, `password[0]`, and a quoted name all match)
+  and its `=` or `:`, **the rest of the line** is replaced. The same screen runs over the whole report,
+  not only the log lines, because the report also echoes settings values and paths. Neither the value's
+  syntax nor the name's shape is modelled: a screen that parses either is bypassed by the next syntax (a
+  scheme and a credential, an escaped quote, a comma inside the value, an index on the name). The cost is
+  the remainder of such a line. Two things pass: a short credential printed under a name that holds none of
   those words, and a value printed on a later line than its name. Nothing user-facing promises that the
   output holds no credential: the home folder is shown as `~`, and the README and the bug template tell
   users to read the output before posting it.

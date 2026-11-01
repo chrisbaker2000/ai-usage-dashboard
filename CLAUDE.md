@@ -218,9 +218,11 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   runs 224 combinations of launchd outcome, property-list state, shell settings, health result, and
   holder; re-introducing either rule's bug fails it on exactly its own cases. Log lines are screened
   before they are printed (`doctor.screen_for_sharing`) because the output is meant to be pasted publicly.
-  After a credential-looking name the whole rest of the line is replaced and the value's syntax is never
-  parsed: two review rounds in a row found a syntax the previous patch missed (a scheme plus a credential,
-  then an escaped quote). `test_no_value_syntax_lets_a_secret_survive_the_screen_after_a_credential_name`
+  After a credential-looking name the whole rest of the line is replaced and neither the value's syntax nor
+  the name's shape is parsed (the name may be followed by up to 64 characters before its separator, so
+  `password[0]=` and `DB_PASSWORD=` both match): three review rounds in a row found a syntax the previous
+  patch missed (a scheme plus a credential, an escaped quote, an index on the name). The whole rendered
+  report is screened, not only the log lines it quotes, because it also echoes settings values and paths. `test_no_value_syntax_lets_a_secret_survive_the_screen_after_a_credential_name`
   is the list a change must keep passing; add the next syntax there, not a new branch in the regex. `TestNothingIsClaimedThatTheEvidenceDoesNotAllow`
   runs every combination (7 agent states, 3 holders, 6 health results) against stated invariants. Seven
   review rounds on branch-by-branch logic each found the next unknown input; the table and that test are

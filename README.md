@@ -58,7 +58,7 @@ Do each step, check its result, and stop at the first failure you cannot fix by 
 2. Check `uv --version` works. If uv is missing, run `brew install uv` when Homebrew is present. If Homebrew is not present, stop and tell me; do not run a downloaded installer script without asking me first.
 3. Clone the repository to ~/Developer/ai-usage-dashboard (create ~/Developer if needed). Never clone into Desktop, Documents, Downloads, or iCloud Drive: macOS can block a background agent from reading those. If the folder already exists, run `git pull` in it instead of cloning.
 4. In that folder run `uv sync`. If it says it cannot find Python 3.13, run `uv python install 3.13`, then `uv sync` again.
-5. In that folder run `.venv/bin/usagedash agent install`. Warnings about directories left off the agent's PATH are normal. The command waits up to 20 seconds for the dashboard and exits 0 only when the dashboard answers.
+5. In that folder run `.venv/bin/usagedash agent install`. Warnings about directories left off the agent's PATH are normal. The command waits about 20 seconds for the dashboard and exits 0 only when the dashboard answers.
 6. If step 5 exits nonzero, run `.venv/bin/usagedash doctor` and read all of it. Fix the first line marked FAIL using the Troubleshooting section of README.md in the repository, then run `.venv/bin/usagedash agent install` and `.venv/bin/usagedash doctor` again. Repeat until doctor's last line starts with "Result: all" or "Result: working".
 7. Run `.venv/bin/usagedash open`.
 
@@ -162,7 +162,7 @@ shell's home directory, the CLIs it found, and a checked PATH. It starts now and
 macOS login. Install warnings about directories left off PATH are expected when those directories are
 missing or another account could change them. They are not errors.
 
-`agent install` then waits up to 20 seconds for the dashboard to answer. It exits 0 once it does, and
+`agent install` then waits about 20 seconds for the dashboard to answer. It exits 0 once it does, and
 that is the sign the install worked. If it exits 1, the agent is installed but nothing is serving
 yet. The output shows what launchd says and the last lines of the agent's logs, and
 `.venv/bin/usagedash doctor` explains the rest: see [Troubleshooting](#troubleshooting).

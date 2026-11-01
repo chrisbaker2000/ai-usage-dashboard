@@ -492,12 +492,20 @@ def _wait_until_answering(
     an install that returned there could not tell a slow start from one that crashed. A run that already
     ended in failure ends the wait early: launchd waits ``RESTART_THROTTLE_SECONDS`` before the next try,
     so waiting longer would only delay the report.
+
+    The deadline is checked after every step that can take time, so no probe starts after it. A step that is
+    already running is not cut short: one health request takes up to ``LIVENESS_TIMEOUT_SECONDS`` and a
+    launchd question can take up to its own limit, so the wait is "about" the deadline, not exactly it.
     """
     deadline = monotonic() + INSTALL_READY_WAIT_SECONDS
     while True:
         if _dashboard_is_listening(dashboard_url):
             return True
-        if monotonic() >= deadline or _agent_has_stopped(paths):
+        if monotonic() >= deadline:
+            return False
+        if _agent_has_stopped(paths):
+            return False
+        if monotonic() >= deadline:
             return False
         sleep(INSTALL_READY_POLL_SECONDS)
 
