@@ -152,7 +152,13 @@ or every IPv4 address. ``lsof`` prints the second as ``*``."""
 
 
 def _loopback_holder(output: str) -> PortHolder | None:
-    """Pick the first process in ``lsof -Fpcn`` output that has a listener the loopback address reaches."""
+    """Return the one process in ``lsof -Fpcn`` output with a listener the loopback address reaches, else None.
+
+    Two processes can both listen (one on ``127.0.0.1`` and one on every address), and a connection reaches only
+    one of them. Which one is not something this output says, so more than one is "no holder can be named", the
+    same as none seen, and neither can be blamed or cleared. One process listening twice is still one holder.
+    """
+    holders: dict[int, str] = {}
     pid: int | None = None
     command = ""
     for line in output.splitlines():
@@ -163,8 +169,11 @@ def _loopback_holder(output: str) -> PortHolder | None:
         elif field == "c":
             command = value
         elif field == "n" and pid is not None and value.rpartition(":")[0] in LOOPBACK_LISTENER_HOSTS:
-            return PortHolder(pid, _printable(command))
-    return None
+            holders.setdefault(pid, _printable(command))
+    if len(holders) != 1:
+        return None
+    ((only_pid, only_command),) = holders.items()
+    return PortHolder(only_pid, only_command)
 
 
 _EMAIL_ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
@@ -495,12 +504,16 @@ def path_findings(settings: Settings) -> list[Finding]:
 
 
 def _port_is_free(port: int) -> bool:
-    """Whether this account can bind ``port`` on the loopback address right now; the socket is closed at once."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        try:
+    """Whether this account can bind ``port`` on the loopback address right now; the socket is closed at once.
+
+    A socket that cannot even be created (no file descriptors left) is "not free": the answer only chooses a
+    port to suggest, and an error here must not replace the report it is part of.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.bind((LOOPBACK_HOST, port))
-        except OSError:
-            return False
+    except OSError:
+        return False
     return True
 
 
@@ -734,7 +747,7 @@ def _answer_not_attributable(port: int, view: AgentView, detail: tuple[str, ...]
         why = "launchd's state for the agent could not be read."
         fix = "Run `usagedash agent status`. If the agent is not running, run `usagedash agent install`."
     else:
-        why = "Doctor could not see which process holds the port."
+        why = "Doctor could not tell which process holds the port."
         fix = f"If this is unexpected, run `lsof -nP -iTCP:{port} -sTCP:LISTEN` yourself to see who holds it."
     return Finding(
         Level.WARN,
@@ -757,7 +770,7 @@ def _unattributed_trouble(port: int, health: HealthResult) -> Finding:
     return Finding(
         Level.FAIL,
         title,
-        ("Doctor could not see which process holds the port, so it cannot tell the agent from another program.",),
+        ("Doctor could not tell which process holds the port, so it cannot tell the agent from another program.",),
         "Restart the agent with `usagedash agent install`, then run `usagedash doctor` again. If it fails the same "
         f"way, another program may hold port {port}. {_move_fix(port)} The log lines below may say more.",
     )
@@ -800,19 +813,21 @@ def _agent_trouble_title(agent_pid: int, port: int, health: HealthResult) -> str
 
 
 def log_findings(paths: AgentPaths) -> list[Finding]:
-    """Show the last lines of the two logs the agent writes, when they hold anything.
+    """Show the last lines of the three logs the agent writes, when they hold anything.
 
-    The server writes its records to standard error as well as to its own file, so launchd's capture of
-    standard error usually repeats them: a tail identical to the one just shown is not shown again.
+    launchd captures standard error and standard output apart (a failure reported only on standard output
+    would otherwise be missing), and the server writes its records to standard error as well as to its own
+    file, so those usually repeat each other: a tail identical to one already shown is not shown again.
     """
     findings: list[Finding] = []
-    shown: list[str] | None = None
-    for log in (paths.launchd_logs[1], paths.server_log):
+    shown: list[list[str]] = []
+    standard_output, standard_error = paths.launchd_logs
+    for log in (standard_error, standard_output, paths.server_log):
         lines = tail_lines(log)
-        if not lines or lines == shown:
+        if not lines or lines in shown:
             continue
         findings.append(Finding(Level.INFO, f"Last lines of {log}", tuple(lines)))
-        shown = lines
+        shown.append(lines)
     return findings
 
 

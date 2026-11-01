@@ -232,7 +232,12 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   runs every combination (7 agent states, 3 holders, 6 health results) against stated invariants. Seven
   review rounds on branch-by-branch logic each found the next unknown input; the table and that test are
   the close for the class, and a mutation of either rule fails it. A holder is a listener the loopback
-  address reaches (`127.0.0.1` or `*`, from `lsof -Fpcn`); one bound to another interface is not.
+  address reaches (`127.0.0.1` or `*`, from `lsof -Fpcn`); one bound to another interface is not. Two
+  different processes that both qualify are no holder at all (a connection reaches only one of them and the
+  output does not say which), so neither is blamed or cleared; one process listening twice is one holder.
+  The log section covers launchd's standard output and standard error and the server's own log, each tail
+  shown once. The README prompts are locked by `tests/test_readme_prompts.py` (an existing checkout is
+  verified before it is pulled, and doctor runs after every install whatever its exit status was).
   An answer that does not come from the agent is a `FAIL` even when it is healthy. The one thing doctor
   ever binds is a loopback port, briefly, to suggest a free one (`doctor.suggest_port`), and only when a
   conflict is found. The remedy says to change `USAGEDASH_PORT` when this shell sets it to a non-empty

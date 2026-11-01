@@ -960,7 +960,7 @@ class TestWhetherTheDashboardAnswers:
         finding = failures[0]
         assert finding.title == title
         assert finding.details == (
-            "Doctor could not see which process holds the port, so it cannot tell the agent from another program.",
+            "Doctor could not tell which process holds the port, so it cannot tell the agent from another program.",
         )
         assert finding.fix is not None
         assert finding.fix.startswith(
@@ -1081,6 +1081,31 @@ class TestTheFullDiagnosis:
             f"Last lines of {paths.launchd_logs[1]}",
             f"Last lines of {paths.server_log}",
         ]
+
+    def test_launchds_standard_output_capture_is_shown_too_so_a_failure_reported_only_there_is_not_missed(
+        self, paths: agent.AgentPaths
+    ) -> None:
+        standard_output, standard_error = paths.launchd_logs
+        write_log(standard_output, "fatal: only on standard output\n")
+        write_log(standard_error, "Traceback (most recent call last):\n")
+
+        findings = doctor.log_findings(paths)
+
+        assert titles(findings) == [f"Last lines of {standard_error}", f"Last lines of {standard_output}"]
+        assert findings[1].details == ("fatal: only on standard output",)
+
+    def test_a_tail_repeated_by_a_later_log_is_not_shown_again_even_with_another_log_between_them(
+        self, paths: agent.AgentPaths
+    ) -> None:
+        standard_output, standard_error = paths.launchd_logs
+        mirrored = "2026-11-01 ERROR usagedash.cli: could not bind\n"
+        write_log(standard_error, mirrored)
+        write_log(standard_output, "something else entirely\n")
+        write_log(paths.server_log, mirrored)
+
+        findings = doctor.log_findings(paths)
+
+        assert titles(findings) == [f"Last lines of {standard_error}", f"Last lines of {standard_output}"]
 
     def test_a_problem_adds_the_log_lines_to_the_report(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
@@ -1967,14 +1992,45 @@ class TestReadingALog:
 
 
 class TestFindingWhoHoldsAPort:
-    def test_lsof_is_asked_for_the_listener_and_its_first_process_is_returned(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        run = FakeRun(stdout="p838\ncpython3.13\nf12\nn127.0.0.1:8787\np900\ncother\nf3\nn127.0.0.1:8787\n")
+    def test_lsof_is_asked_for_the_listener_and_its_process_is_returned(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        run = FakeRun(stdout="p838\ncpython3.13\nf12\nn127.0.0.1:8787\n")
         monkeypatch.setattr(doctor.subprocess, "run", run)
 
         assert doctor.port_holder(8787) == PortHolder(838, "python3.13")
         assert run.commands == [[doctor.LSOF_BINARY, "-nP", "-iTCP:8787", "-sTCP:LISTEN", "-Fpcn"]]
+
+    def test_two_processes_that_both_listen_where_the_loopback_address_reaches_are_no_holder_at_all(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = "p838\ncpython3.13\nf12\nn127.0.0.1:8787\np900\ncother\nf3\nn*:8787\n"
+        monkeypatch.setattr(doctor.subprocess, "run", FakeRun(stdout=output))
+
+        assert doctor.port_holder(8787) is None
+
+    def test_one_process_listening_twice_is_still_one_holder(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        output = "p838\ncpython3.13\nf12\nn127.0.0.1:8787\nf13\nn*:8787\n"
+        monkeypatch.setattr(doctor.subprocess, "run", FakeRun(stdout=output))
+
+        assert doctor.port_holder(8787) == PortHolder(838, "python3.13")
+
+    def test_a_second_process_on_another_interface_does_not_make_the_holder_ambiguous(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = "p838\ncpython3.13\nf12\nn127.0.0.1:8787\np900\ncother\nf3\nn192.168.1.5:8787\n"
+        monkeypatch.setattr(doctor.subprocess, "run", FakeRun(stdout=output))
+
+        assert doctor.port_holder(8787) == PortHolder(838, "python3.13")
+
+    def test_a_socket_that_cannot_be_created_is_a_port_that_is_not_free_not_a_crash(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def refuse(*_arguments: object, **_keywords: object) -> socket.socket:
+            raise OSError("Too many open files")
+
+        monkeypatch.setattr(doctor.socket, "socket", refuse)
+
+        assert doctor._port_is_free(8788) is False
+        assert doctor.suggest_port(8787) is None
 
     @pytest.mark.parametrize(
         ("listener", "found"),

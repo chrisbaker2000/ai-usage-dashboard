@@ -56,10 +56,10 @@ Do each step, check its result, and stop at the first failure you cannot fix by 
 
 1. Check this is macOS: `uname -s` must print Darwin.
 2. Check `uv --version` works. If uv is missing, run `brew install uv` when Homebrew is present. If Homebrew is not present, stop and tell me; do not run a downloaded installer script without asking me first.
-3. Clone the repository to ~/Developer/ai-usage-dashboard (create ~/Developer if needed). Never clone into Desktop, Documents, Downloads, or iCloud Drive: macOS can block a background agent from reading those. If the folder already exists, run `git pull` in it instead of cloning.
+3. Clone the repository to ~/Developer/ai-usage-dashboard (create ~/Developer if needed). Never clone into Desktop, Documents, Downloads, or iCloud Drive: macOS can block a background agent from reading those. If the folder already exists, check first that `git -C ~/Developer/ai-usage-dashboard remote get-url origin` prints https://github.com/chrisbaker2000/ai-usage-dashboard.git (or the same address without .git) and that `git -C ~/Developer/ai-usage-dashboard status --porcelain` prints nothing. If either check fails, stop and tell me, and do not pull, sync, or run anything from that folder. Otherwise run `git pull --ff-only` in it instead of cloning.
 4. In that folder run `uv sync`. If it says it cannot find Python 3.13, run `uv python install 3.13`, then `uv sync` again.
 5. In that folder run `.venv/bin/usagedash agent install`. Warnings about directories left off the agent's PATH are normal. The command waits about 20 seconds for the dashboard and exits 0 only when the dashboard answers.
-6. If step 5 exits nonzero, run `.venv/bin/usagedash doctor` and read all of it. Fix the first line marked FAIL using the Troubleshooting section of README.md in the repository, then run `.venv/bin/usagedash agent install` and `.venv/bin/usagedash doctor` again. Repeat until doctor's last line starts with "Result: all" or "Result: working".
+6. Run `.venv/bin/usagedash doctor` and read all of it, even if step 5 exited 0: an older process can answer the health check while the new agent has failed. Fix the first line marked FAIL using the Troubleshooting section of README.md in the repository, then run `.venv/bin/usagedash agent install` and `.venv/bin/usagedash doctor` again. Repeat until doctor's last line starts with "Result: all" or "Result: working".
 7. Run `.venv/bin/usagedash open`.
 
 Rules:
@@ -122,9 +122,9 @@ Rules:
 ```text
 Update the AI usage dashboard in ~/Developer/ai-usage-dashboard to the latest version.
 
-1. In that folder run `git pull`. If it reports local changes or a conflict, stop and tell me.
+1. Check that `git remote get-url origin` in that folder prints https://github.com/chrisbaker2000/ai-usage-dashboard.git (or the same address without .git) and that `git status --porcelain` prints nothing. If either check fails, stop and tell me, and do not pull, sync, or run anything from that folder. Otherwise run `git pull --ff-only`. If it fails, stop and tell me.
 2. Run `uv sync`.
-3. Run `.venv/bin/usagedash agent install`. It exits 0 only when the dashboard answers. If it exits nonzero, run `.venv/bin/usagedash doctor` and follow the Troubleshooting section of README.md.
+3. Run `.venv/bin/usagedash agent install`, then run `.venv/bin/usagedash doctor` and read all of it whatever install's exit status was: an older process can answer the health check while the new agent has failed. If doctor reports a FAIL, follow the Troubleshooting section of README.md, then run both commands again until doctor reports no FAIL.
 4. Run `.venv/bin/usagedash open`.
 
 Never read, print, copy, or send credentials, and do not use sudo or change the repository's code. When you finish, tell me the last line of `usagedash doctor`.
