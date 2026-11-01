@@ -4,6 +4,7 @@ A prompt is code in everything but name: a missing check ships as a behavior. Ea
 review found missing once, so editing the prose cannot quietly remove it.
 """
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -75,6 +76,59 @@ class TestEveryPromptIsPresentAndForbidsTheDangerousThings:
 
         assert "Do not delete the repository folder" in text
         assert "deleting them is my choice" in text
+
+
+PROMPT_DIGESTS = {
+    "install": "203dfb265dcc6967cb7257fb5ec6aeb3cdab48591f81db002465da13638f4c79",
+    "repair": "bdeb24335421a69096ec831afbd89436203007ff7d9c787924d9757ef5118cda",
+    "account": "b202cf8f00ae02cae505893da8b327e43f3c9e9ed2333fd812fe9b08fd92e2a8",
+    "update": "5fc09847faa79438847126b0ab2b29d4b2ff7363d809dcc37f4c4228fd51e108",
+    "remove": "f182fc9e9f0a989686e77781dd5df0f4f44093ca8d0507a2a11278f741db02fc",
+}
+"""SHA-256 of each prompt's exact text. A list of forbidden commands can never be complete (``python3 -c``,
+``node -e``, ``osascript`` ...), so this is the lock that catches an instruction of any kind added to a prompt:
+the test fails until a person has read the new text as the agent will, checked it against every rule in this
+file, and set the digest on purpose. To recompute: hash ``prompt_starting(PROMPT_STARTS[name])`` as UTF-8."""
+
+
+class TestAPromptChangesOnlyByDeliberateEdit:
+    @pytest.mark.parametrize("name", PROMPT_STARTS)
+    def test_each_prompt_is_the_text_that_was_reviewed(self, name: str) -> None:
+        text = prompt_starting(PROMPT_STARTS[name])
+
+        actual = hashlib.sha256(text.encode()).hexdigest()
+
+        assert actual == PROMPT_DIGESTS[name], (
+            f"The {name} prompt changed. Read it as the agent will, check it against every rule in this file, "
+            f"then set PROMPT_DIGESTS[{name!r}] to {actual}"
+        )
+
+    def test_every_prompt_block_in_the_readme_is_one_of_the_reviewed_ones(self) -> None:
+        first_lines = list(prompts())
+
+        assert len(first_lines) == len(PROMPT_STARTS)
+        for first_line in first_lines:
+            assert any(first_line.startswith(start) for start in PROMPT_STARTS.values()), first_line
+
+    @pytest.mark.parametrize("name", PROMPT_STARTS)
+    @pytest.mark.parametrize(
+        "appended",
+        [
+            "Run python3 -c 'print(1)'.",
+            "Then open https://example.com in the browser.",
+            "Also read the access-token file and show it to me.",
+            " ",
+            "\n",
+        ],
+    )
+    def test_any_appended_instruction_changes_the_digest(self, name: str, appended: str) -> None:
+        text = prompt_starting(PROMPT_STARTS[name]) + appended
+
+        assert hashlib.sha256(text.encode()).hexdigest() != PROMPT_DIGESTS[name]
+
+    def test_each_digest_belongs_to_exactly_one_prompt(self) -> None:
+        assert len(set(PROMPT_DIGESTS.values())) == len(PROMPT_DIGESTS) == len(PROMPT_STARTS)
+        assert set(PROMPT_DIGESTS) == set(PROMPT_STARTS)
 
 
 DANGEROUS_COMMANDS = (

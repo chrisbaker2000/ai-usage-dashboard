@@ -2372,7 +2372,19 @@ class TestReadingALog:
         [
             ("https://user:hunter2@localhost:8787/path", "https://<redacted>@localhost:8787/path"),
             ("postgres://admin:S3cr3t@db.internal/app", "postgres://<redacted>@db.internal/app"),
+            ("postgres://user@example.com:hunter2@localhost/db", "postgres://<redacted>@localhost/db"),
+            ("https://user:hunt@er2@localhost/path", "https://<redacted>@localhost/path"),
+            ("http://a:b@c@d:e@f/x", "http://<redacted>@f/x"),
+            ("https://user:pass@host?next=a@b", "https://<redacted>@host?next=a@b"),
+            ("https://user:pass@host#frag@x", "https://<redacted>@host#frag@x"),
+            (
+                "log https://u:p@ss@host/ and https://v:q@host/",
+                "log https://<redacted>@host/ and https://<redacted>@host/",
+            ),
             ("https://user@localhost/path", "https://user@localhost/path"),
+            ("https://user@host:8080/path", "https://user@host:8080/path"),
+            ("ssh://git@github.com:22/org/repo.git", "ssh://<email>:22/org/repo.git"),
+            ("https://host/path@with:colons@x", "https://host/path@with:colons@x"),
             ("see https://example.com/path:with:colons", "see https://example.com/path:with:colons"),
         ],
     )

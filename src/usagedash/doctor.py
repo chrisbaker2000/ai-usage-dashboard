@@ -200,7 +200,10 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
     .*                                                         # the rest of the line, whatever its syntax
     """
 )
-_URL_CREDENTIALS = re.compile(r"\b([A-Za-z][A-Za-z0-9+.-]*://)[^/\s:@]*:[^/\s@]*@")
+_URL_CREDENTIALS = re.compile(r"\b([A-Za-z][A-Za-z0-9+.-]*://)(?=[^/\s?#]*:[^/\s?#]*@)[^/\s?#]*@")
+"""The user and password of ``scheme://user:password@host``: everything in the authority up to its last ``@``,
+which is where the host starts, so an ``@`` inside the user or the password does not end the match early. A
+colon must come before that ``@``: ``scheme://user@host:8080`` has a user and no password and is left alone."""
 _TOKEN_LIKE = re.compile(r"[A-Za-z0-9_+=-]{32,}")
 REDACTED = "<redacted>"
 

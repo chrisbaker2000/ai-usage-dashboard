@@ -261,7 +261,11 @@ ValidError` passing it, because a type name cannot be told from a value by its s
   output does not say which), so neither is blamed or cleared; one process listening twice is one holder.
   The log section covers launchd's standard output and standard error and the server's own log, each tail
   shown once. The README prompts are locked by `tests/test_readme_prompts.py` (an existing checkout is
-  verified before it is pulled, and doctor runs after every install whatever its exit status was).
+  verified before it is pulled, and doctor runs after every install whatever its exit status was). Each
+  prompt's exact text is also locked by a SHA-256 digest there (`PROMPT_DIGESTS`): a list of forbidden
+  commands can never be complete, so editing a prompt, or appending anything to it, fails a test until a
+  person has read the new text as the agent will and set the digest on purpose. The failure message prints
+  the new digest.
   An answer that does not come from the agent is a `FAIL` even when it is healthy. The one thing doctor
   ever binds is a loopback port, briefly, to suggest a free one (`doctor.suggest_port`), and only when a
   conflict is found. The remedy says to change `USAGEDASH_PORT` when this shell sets it to a non-empty
