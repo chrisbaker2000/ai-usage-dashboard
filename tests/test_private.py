@@ -1367,6 +1367,107 @@ class TestCheckingAnEntryWithoutOpeningIt:
         )
 
 
+class TestWhatLetsAnotherAccountLook:
+    @pytest.mark.parametrize("mode", [0o700, 0o500, 0o300, 0o000])
+    def test_a_directory_with_no_group_or_other_bits_is_owner_only(self, tmp_path: Path, mode: int) -> None:
+        directory = tmp_path / "private"
+        directory.mkdir()
+        directory.chmod(mode)
+        try:
+            assert private.what_lets_another_account_look(directory) is None
+        finally:
+            directory.chmod(0o700)
+
+    @pytest.mark.parametrize("mode", [0o750, 0o755, 0o705, 0o701, 0o710, 0o740, 0o704, 0o770, 0o777])
+    def test_any_group_or_other_bit_lets_another_account_open_it(self, tmp_path: Path, mode: int) -> None:
+        directory = tmp_path / "shared"
+        directory.mkdir()
+        directory.chmod(mode)
+        try:
+            assert private.what_lets_another_account_look(directory) == (
+                f"its permissions ({mode:04o}) let other accounts open it"
+            )
+        finally:
+            directory.chmod(0o700)
+
+    def test_a_symbolic_link_is_reported_without_following_it(self, tmp_path: Path) -> None:
+        target = tmp_path / "target"
+        target.mkdir(mode=0o700)
+        link = tmp_path / "link"
+        link.symlink_to(target)
+
+        assert private.what_lets_another_account_look(link) == "it is a symbolic link"
+
+    @pytest.mark.parametrize("name", ["missing", "nul\x00name"])
+    def test_an_entry_that_cannot_be_examined_is_a_config_error(self, tmp_path: Path, name: str) -> None:
+        with pytest.raises(ConfigError, match="cannot examine"):
+            private.what_lets_another_account_look(tmp_path / name)
+
+    def test_an_error_reading_the_access_control_list_is_a_config_error_named_by_its_type(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        directory = tmp_path / "private"
+        directory.mkdir(mode=0o700)
+
+        def unreadable(path: Path) -> str:
+            raise PermissionError("synthetic")
+
+        monkeypatch.setattr(private, "_access_control_text_of", unreadable)
+
+        with pytest.raises(ConfigError, match="PermissionError"):
+            private.what_lets_another_account_look(directory)
+
+    @pytest.mark.parametrize(
+        "listed",
+        [
+            "!#acl 1\nuser:ABC:someone:502:allow:read",
+            "!#acl 1\nuser:ABC:owner:501:allow:read,list",
+            "!#acl 1\ngroup:ABC:everyone:12:deny:write",
+            "user:ABC:someone:502:allow:read",
+        ],
+    )
+    def test_any_access_control_entry_is_reported_because_the_package_removes_the_whole_list(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listed: str
+    ) -> None:
+        directory = tmp_path / "private"
+        directory.mkdir(mode=0o700)
+        monkeypatch.setattr(private, "_access_control_text_of", lambda _path: listed)
+
+        assert private.what_lets_another_account_look(directory) == "it has an access-control list"
+
+    @pytest.mark.parametrize("listed", ["", "!#acl 1\n", "!#acl 1\n\n", "\n"])
+    def test_an_empty_list_or_only_its_header_is_not_an_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listed: str
+    ) -> None:
+        directory = tmp_path / "private"
+        directory.mkdir(mode=0o700)
+        monkeypatch.setattr(private, "_access_control_text_of", lambda _path: listed)
+
+        assert private.what_lets_another_account_look(directory) is None
+
+    def test_a_directory_ensure_private_directory_made_passes_and_one_it_has_not_touched_may_not(
+        self, tmp_path: Path
+    ) -> None:
+        made = tmp_path / "made"
+        ensure_private_directory(made)
+        untouched = tmp_path / "untouched"
+        untouched.mkdir()
+        untouched.chmod(0o755)
+        try:
+            assert private.what_lets_another_account_look(made) is None
+            assert private.what_lets_another_account_look(untouched) is not None
+        finally:
+            untouched.chmod(0o700)
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS ACLs")
+    def test_a_real_read_only_access_control_entry_is_reported(self, tmp_path: Path) -> None:
+        directory = tmp_path / "private"
+        directory.mkdir(mode=0o700)
+        subprocess.run(["/bin/chmod", "+a", "everyone allow list", str(directory)], check=True)
+
+        assert private.what_lets_another_account_look(directory) == "it has an access-control list"
+
+
 @pytest.mark.parametrize("problem", ["none", "nested", "container", "destination", "foreign-link"])
 def test_executable_directory_links_keep_their_ancestry_checks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, problem: str

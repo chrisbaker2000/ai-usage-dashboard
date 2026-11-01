@@ -114,6 +114,11 @@ not running at all and something else answers.
   (`private.read_file_only_owner_can_change`). A file this account owns that other accounts can read is
   made owner-only on that read; a file another account can write is refused and left as it is. So a
   `doctor` run does not preserve a mode of 0644 for diagnosis.
+- **A data directory others can open is a warning, not a failure.** `doctor` fails when another account
+  can change the data directory, and warns when one can only look at it: any group or other permission
+  bit, or any access-control entry, including a deny or the owner's own. The files in it are owner-only
+  on their own, so what shows is the folder's listing and the sizes and times of what is in it. It does
+  not tighten the folder; `usagedash agent install` does, as every start of the server does.
 - **The port holder is only what this account can see.** `doctor` asks `lsof`, which lists only this
   account's processes without administrator rights, and counts only a listener that a connection to
   `127.0.0.1` reaches. A holder it names is real; an absent holder is not proof the port is free, and it

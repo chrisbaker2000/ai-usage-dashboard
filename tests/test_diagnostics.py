@@ -1507,7 +1507,7 @@ class TestTheFullDiagnosis:
         assert not (tmp_path / "data").exists()
 
     def test_an_existing_data_directory_is_ok(self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine) -> None:
-        (tmp_path / "data").mkdir()
+        (tmp_path / "data").mkdir(mode=0o700)
 
         assert (
             only(doctor.diagnose(paths, shell=settings_for(tmp_path), served=None), "is safe to use").level is Level.OK
@@ -1585,8 +1585,8 @@ class TestTheFullDiagnosis:
         assert failure.fix == "Run `usagedash agent install`, which makes it owner-only again."
         assert "is safe to use" not in " ".join(titles(findings))
 
-    @pytest.mark.parametrize("mode", [0o700, 0o750, 0o755, 0o705, 0o500])
-    def test_a_data_directory_others_can_at_most_read_is_safe_to_use(self, tmp_path: Path, mode: int) -> None:
+    @pytest.mark.parametrize("mode", [0o700, 0o500])
+    def test_an_owner_only_data_directory_is_safe_to_use(self, tmp_path: Path, mode: int) -> None:
         settings = settings_for(tmp_path)
         data = tmp_path / "data"
         data.mkdir()
@@ -1598,6 +1598,74 @@ class TestTheFullDiagnosis:
             data.chmod(0o700)
 
         assert titles(findings, Level.OK) == [f"The data directory {data} is safe to use"]
+
+    @pytest.mark.parametrize("mode", [0o750, 0o755, 0o705, 0o701, 0o710, 0o740, 0o704, 0o554])
+    def test_a_data_directory_others_can_open_is_a_warning_that_is_not_safe_to_use(
+        self, tmp_path: Path, mode: int
+    ) -> None:
+        settings = settings_for(tmp_path)
+        data = tmp_path / "data"
+        data.mkdir()
+        data.chmod(mode)
+
+        try:
+            findings = doctor.data_directory_findings(settings)
+        finally:
+            data.chmod(0o700)
+
+        [warning] = findings
+        assert warning.level is Level.WARN
+        assert warning.title == (
+            f"Other accounts can look at the data directory {data}: "
+            f"its permissions ({mode:04o}) let other accounts open it"
+        )
+        assert warning.fix == "Run `usagedash agent install`, which makes it owner-only again."
+        assert "is safe to use" not in " ".join(titles(findings))
+
+    def test_a_data_directory_with_an_access_control_list_is_a_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = settings_for(tmp_path)
+        data = tmp_path / "data"
+        data.mkdir(mode=0o700)
+        monkeypatch.setattr(doctor, "what_lets_another_account_look", lambda _path: "it has an access-control list")
+
+        [warning] = doctor.data_directory_findings(settings)
+
+        assert warning.level is Level.WARN
+        assert warning.title == f"Other accounts can look at the data directory {data}: it has an access-control list"
+
+    def test_a_data_directory_that_cannot_be_examined_for_who_can_look_is_a_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = settings_for(tmp_path)
+        (tmp_path / "data").mkdir(mode=0o700)
+
+        def unreadable(path: Path) -> str | None:
+            raise ConfigError(f"cannot examine {path}: PermissionError")
+
+        monkeypatch.setattr(doctor, "what_lets_another_account_look", unreadable)
+
+        [failure] = doctor.data_directory_findings(settings)
+
+        assert failure.level is Level.FAIL
+        assert failure.title == (
+            f"The data directory cannot be examined: cannot examine {tmp_path / 'data'}: PermissionError"
+        )
+
+    def test_a_data_directory_another_account_can_write_is_a_failure_and_is_not_also_asked_who_can_look(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = settings_for(tmp_path)
+        (tmp_path / "data").mkdir(mode=0o700)
+        monkeypatch.setattr(doctor, "what_lets_another_account_change", lambda _path: "it is writable")
+
+        def forbidden(_path: Path) -> str | None:
+            raise AssertionError("the look check must not run after a change problem")
+
+        monkeypatch.setattr(doctor, "what_lets_another_account_look", forbidden)
+
+        assert [finding.level for finding in doctor.data_directory_findings(settings)] == [Level.FAIL]
 
     def test_an_access_control_entry_that_lets_another_account_change_the_directory_is_a_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1642,7 +1710,7 @@ class TestTheFullDiagnosis:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         settings = settings_for(tmp_path)
-        (tmp_path / "data").mkdir()
+        (tmp_path / "data").mkdir(mode=0o700)
         monkeypatch.setattr(doctor, "ensure_no_ancestor_lets_another_account_replace", lambda _directory: None)
 
         assert titles(doctor.data_directory_findings(settings), Level.OK) == [
@@ -2129,6 +2197,41 @@ class TestReadingALog:
 
         assert doctor.tail_lines(log, max_bytes=10) == ["x" * 10]
 
+    @pytest.mark.parametrize(
+        "separator",
+        ["\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029", "\r", "\r\r", "\v\f"],
+    )
+    def test_a_character_that_splitlines_treats_as_a_line_end_does_not_part_a_credential_from_its_name(
+        self, tmp_path: Path, separator: str
+    ) -> None:
+        log = tmp_path / "log"
+        log.write_bytes(f"password={separator}hunter2\nafter\n".encode())
+
+        shown = doctor.tail_lines(log)
+
+        assert shown is not None
+        assert "hunter2" not in "".join(shown)
+        assert shown[-1] == "after"
+        assert len(shown) == 2
+
+    def test_a_windows_line_ending_does_not_leave_a_carriage_return_on_the_line(self, tmp_path: Path) -> None:
+        log = tmp_path / "log"
+        log.write_bytes(b"first\r\nsecond\r\n")
+
+        assert doctor.tail_lines(log) == ["first", "second"]
+
+    def test_blank_lines_are_kept_so_the_log_keeps_its_shape(self, tmp_path: Path) -> None:
+        log = tmp_path / "log"
+        log.write_text("first\n\nthird\n")
+
+        assert doctor.tail_lines(log) == ["first", "", "third"]
+
+    def test_a_log_that_does_not_end_with_a_line_feed_keeps_its_last_line(self, tmp_path: Path) -> None:
+        log = tmp_path / "log"
+        log.write_text("first\nsecond")
+
+        assert doctor.tail_lines(log) == ["first", "second"]
+
     def test_a_credential_or_an_email_address_in_a_log_line_is_replaced_before_it_is_shown(
         self, tmp_path: Path
     ) -> None:
@@ -2505,6 +2608,15 @@ class TestFindingWhoHoldsAPort:
         for failure in (FileNotFoundError("lsof"), doctor.subprocess.TimeoutExpired(["lsof"], 10)):
             monkeypatch.setattr(doctor.subprocess, "run", FakeRun(error=failure))
             assert doctor.port_holder(8787) is None
+
+    @pytest.mark.parametrize("separator", ["\v", "\f", "\x85", "\u2028", "\r"])
+    def test_a_process_name_holding_a_line_separator_cannot_forge_a_listener_field(
+        self, monkeypatch: pytest.MonkeyPatch, separator: str
+    ) -> None:
+        output = f"p838\ncpython{separator}n127.0.0.1:8787\nf12\nn192.168.1.5:8787\n"
+        monkeypatch.setattr(doctor.subprocess, "run", FakeRun(stdout=output))
+
+        assert doctor.port_holder(8787) is None
 
     def test_a_command_name_is_made_printable(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(doctor.subprocess, "run", FakeRun(stdout="p5\nca\x1bb\nf3\nn127.0.0.1:8787\n"))

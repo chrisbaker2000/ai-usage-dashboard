@@ -30,7 +30,11 @@ from usagedash.api import HEALTH_PATH
 from usagedash.config import LOOPBACK_HOST, MAX_PORT, MIN_PORT, PORT_ENV, Settings
 from usagedash.errors import ConfigError, UsageDashError
 from usagedash.executables import checked_command, checked_executable, execution_environment
-from usagedash.private import ensure_no_ancestor_lets_another_account_replace, what_lets_another_account_change
+from usagedash.private import (
+    ensure_no_ancestor_lets_another_account_replace,
+    what_lets_another_account_change,
+    what_lets_another_account_look,
+)
 
 HTTP_OK = 200
 LSOF_BINARY = "/usr/sbin/lsof"
@@ -167,7 +171,7 @@ def _loopback_holder(output: str) -> PortHolder | None:
     holders: dict[int, str] = {}
     pid: int | None = None
     command = ""
-    for line in output.splitlines():
+    for line in output.split("\n"):
         field, value = line[:1], line[1:]
         if field == "p":
             pid = int(value) if value.isascii() and value.isdecimal() else None
@@ -260,6 +264,10 @@ def tail_lines(path: Path, *, max_lines: int = LOG_TAIL_LINES, max_bytes: int = 
 
     The file is opened without following a link and without blocking, and must be a regular file of this
     account's, so a link or a pipe put in the log directory is not read.
+
+    Lines end at a line feed and nowhere else. ``str.splitlines`` also ends one at a vertical tab, a form feed,
+    the file, group, and record separators, a next-line character, and U+2028 and U+2029, and a credential's
+    name and its value on either side of one would be screened as two lines, each looking harmless alone.
     """
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -278,7 +286,10 @@ def tail_lines(path: Path, *, max_lines: int = LOG_TAIL_LINES, max_bytes: int = 
     finally:
         os.close(descriptor)
     begins_a_line = start == 0 or data[:1] == b"\n"
-    lines = data[start - before :].decode("utf-8", errors="replace").splitlines()
+    lines = data[start - before :].decode("utf-8", errors="replace").split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    lines = [line.removesuffix("\r") for line in lines]
     if not begins_a_line and len(lines) == 1:
         return [f"(the last line is longer than {max_bytes} bytes and is not shown; open {path} to read it)"]
     if not begins_a_line and lines:
@@ -365,7 +376,9 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
     folder this account owns that no other account can change: ``private.ensure_private_directory`` refuses a
     symbolic link or a file there and cannot make another account's folder private, and it tightens an owned
     folder's modes and access-control list only when it runs, not before. The ancestry walk does not look at
-    that last entry, so "safe to use" is claimed only after ``what_lets_another_account_change`` finds nothing.
+    that last entry, so "safe to use" is claimed only after ``what_lets_another_account_change`` finds nothing
+    and ``what_lets_another_account_look`` finds nothing: the server makes the directory owner-only, with no
+    group or other bits and no access-control list, so a folder that others can open is not as it leaves it.
     """
     data_dir = settings.data_dir
     try:
@@ -402,15 +415,29 @@ def data_directory_findings(settings: Settings) -> list[Finding]:
         return [Finding(Level.FAIL, f"The data directory {data_dir} belongs to another account", fix=in_the_way)]
     try:
         problem = what_lets_another_account_change(data_dir)
+        visible = None if problem is not None else what_lets_another_account_look(data_dir)
     except ConfigError as error:
         return [Finding(Level.FAIL, f"The data directory cannot be examined: {error}", fix=cannot_examine)]
+    make_owner_only = "Run `usagedash agent install`, which makes it owner-only again."
     if problem is not None:
         return [
             Finding(
                 Level.FAIL,
                 f"Another account can change the data directory {data_dir}: {problem}",
                 ("It holds the database and the access token, so another account could replace them.",),
-                "Run `usagedash agent install`, which makes it owner-only again.",
+                make_owner_only,
+            )
+        ]
+    if visible is not None:
+        return [
+            Finding(
+                Level.WARN,
+                f"Other accounts can look at the data directory {data_dir}: {visible}",
+                (
+                    "It holds the database and the access token. Each is owner-only on its own, but the folder's "
+                    "listing and the sizes and times of what is in it are visible.",
+                ),
+                make_owner_only,
             )
         ]
     return [Finding(Level.OK, f"The data directory {data_dir} is safe to use")]
