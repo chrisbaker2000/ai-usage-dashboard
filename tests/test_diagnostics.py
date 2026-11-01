@@ -2441,11 +2441,23 @@ class TestTheFullDiagnosis:
         assert finding.title == "The directory of a vendor CLI would be left off the agent's PATH: /opt/tools/bin"
         assert finding.details == (
             "its permissions (0775) let other accounts write",
-            "The CLI starts from its recorded path, but anything it starts by name from that directory (a "
-            "Node-based CLI looks for `node`) will not be found.",
+            "A CLI recorded as a file path still starts from there, but anything it starts by name from that "
+            "directory (a Node-based CLI looks for `node`) will not be found; a CLI recorded by its name alone "
+            "cannot be found in it at all.",
         )
         assert finding.fix is not None
         assert "writable by you alone" in finding.fix
+
+    def test_the_warning_does_not_say_a_cli_recorded_by_name_still_starts_from_a_directory_that_is_left_off(
+        self, tmp_path: Path
+    ) -> None:
+        directory = TestTheInstalledAgentsPath.unsafe_directory(tmp_path, "bin", holding="claude")
+
+        [finding] = doctor.agent_path_findings(settings_for(tmp_path), str(directory))
+
+        assert "cannot be found in it at all" in finding.details[1]
+        assert "recorded by its name alone" in finding.details[1]
+        assert "The CLI starts from its recorded path" not in finding.details[1]
 
     @pytest.mark.parametrize(
         ("count", "noun", "hidden"), [(1, "directory", 0), (2, "directories", 0), (11, "directories", 1)]
@@ -3280,6 +3292,61 @@ class TestTheInstalledAgentsPath:
 
         assert any("is discarded from the installed agent's PATH" in title for title in titles(installed))
         assert not [title for title in titles(fresh) if "installed agent's PATH" in title]
+
+
+class TestNoFailureAlwaysMeansTheDashboardWasChecked:
+    """The report's rule, enforced once at the end so that no path through ``diagnose`` can break it."""
+
+    def test_an_install_that_finishes_between_the_two_reads_is_a_failure_and_not_a_silent_all_clear(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        machine.running()
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
+
+        answer_titles = ("The dashboard answers", "Nothing is listening", f"Port {PORT}", "The request to port")
+        assert not [title for title in titles(findings) if title.startswith(answer_titles)]
+        [failure] = [found for found in findings if "could not tell which installation to check" in found.title]
+        assert failure.level is Level.FAIL
+        assert failure.title == (
+            "Doctor could not tell which installation to check, so it did not check that the dashboard answers"
+        )
+        assert failure.details == ("The installed agent or its settings changed while doctor was reading them.",)
+        assert failure.fix == "Run `usagedash doctor` again once any install has finished."
+        assert doctor.has_failure(findings)
+
+    def test_the_log_lines_are_shown_for_that_failure_like_for_any_other(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        machine.running()
+        shown: list[agent.AgentPaths] = []
+        monkeypatch.setattr(doctor, "log_findings", lambda given: shown.append(given) or [])
+
+        doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
+
+        assert shown == [paths]
+
+    def test_a_failure_that_is_already_there_is_not_joined_by_a_second_one(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        machine.running()
+
+        findings = doctor.diagnose(
+            paths, shell=settings_for(tmp_path), served=ConfigError("port must be an integer, got 'x'")
+        )
+
+        assert not [found for found in findings if "could not tell which installation" in found.title]
+        assert doctor.has_failure(findings)
+
+    def test_nothing_installed_is_still_checked_through_this_shells_settings_and_adds_nothing(
+        self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
+    ) -> None:
+        machine.nothing_installed()
+        machine.health = HealthResult(HealthKind.ANSWERED, 200)
+
+        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
+
+        assert not [found for found in findings if "could not tell which installation" in found.title]
 
 
 class TestAnUnexpectedErrorNeverEndsTheReport:

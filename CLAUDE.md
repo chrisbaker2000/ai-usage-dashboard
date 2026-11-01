@@ -220,7 +220,11 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   property list is not diagnosed with this shell's port. The installed agent's settings are loaded through
   the guard `serve` applies to its own config directory (`cli._installed_settings_as_serve_sees_them`).
   **The report as a whole obeys one invariant: a report with no failure has established that the dashboard
-  answers**, so "working" can never rest on a skipped port check. A loaded agent with no property list is
+  answers**, so "working" can never rest on a skipped port check. It is enforced once, at the end of
+  `diagnose` (`doctor._health_not_checked`), and not left to each path: the property list and launchd are
+  read at different moments, and an install that finishes between the reads leaves the settings saying
+  nothing is installed while the agent view says one runs, which skipped the port check with no failure of
+  its own. A loaded agent with no property list is
   therefore a `FAIL`, not a warning (nothing says which port it serves), an unreachable launchd is not
   taken for "nothing installed", and a remedy never points at another finding ("fix it above"), because
   that finding may have none. `test_a_report_without_a_failure_has_established_that_the_dashboard_answers`

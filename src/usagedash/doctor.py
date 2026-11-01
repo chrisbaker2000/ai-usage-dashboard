@@ -668,8 +668,9 @@ def _omission_findings(
             f"{vendor_title}: {omission.directory}",
             (
                 omission.reason,
-                "The CLI starts from its recorded path, but anything it starts by name from that directory (a "
-                "Node-based CLI looks for `node`) will not be found.",
+                "A CLI recorded as a file path still starts from there, but anything it starts by name from that "
+                "directory (a Node-based CLI looks for `node`) will not be found; a CLI recorded by its name alone "
+                "cannot be found in it at all.",
             ),
             vendor_fix,
         )
@@ -1134,9 +1135,28 @@ def diagnose(paths: AgentPaths, *, shell: SettingsOutcome, served: SettingsOutco
     findings.extend(view.findings)
     if effective is not None:
         findings.extend(_guarded("port", lambda: _answer_findings(effective.port, view)))
+    elif not has_failure(findings):
+        findings.append(_health_not_checked())
     if has_failure(findings):
         findings.extend(_guarded("log", lambda: log_findings(paths)))
     return findings
+
+
+def _health_not_checked() -> Finding:
+    """The failure that keeps "no failure" meaning "the dashboard answers" when no installation could be chosen.
+
+    Every ordinary way of reaching that point has a failure of its own (settings that do not load, a property
+    list that cannot be trusted, an agent with none). One does not: the property list and launchd are read at
+    different moments, and an install that finishes between them leaves the settings saying nothing is installed
+    while the agent view says one is running. The report's rule holds for every path only if it is enforced once,
+    here, and not left to each path.
+    """
+    return Finding(
+        Level.FAIL,
+        "Doctor could not tell which installation to check, so it did not check that the dashboard answers",
+        ("The installed agent or its settings changed while doctor was reading them.",),
+        "Run `usagedash doctor` again once any install has finished.",
+    )
 
 
 def _agent_path(environment: dict[str, str] | None) -> str:
