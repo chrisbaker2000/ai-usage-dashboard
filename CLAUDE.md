@@ -209,7 +209,15 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
   running agent with a holder nobody could see is a warning. This shell's settings stand in for the agent's
   only when nothing is installed at all (no property list and nothing loaded); an agent loaded without its
   property list is not diagnosed with this shell's port. The installed agent's settings are loaded through
-  the guard `serve` applies to its own config directory (`cli._installed_settings_as_serve_sees_them`). `TestNothingIsClaimedThatTheEvidenceDoesNotAllow`
+  the guard `serve` applies to its own config directory (`cli._installed_settings_as_serve_sees_them`).
+  **The report as a whole obeys one invariant: a report with no failure has established that the dashboard
+  answers**, so "working" can never rest on a skipped port check. A loaded agent with no property list is
+  therefore a `FAIL`, not a warning (nothing says which port it serves), an unreachable launchd is not
+  taken for "nothing installed", and a remedy never points at another finding ("fix it above"), because
+  that finding may have none. `test_a_report_without_a_failure_has_established_that_the_dashboard_answers`
+  runs 224 combinations of launchd outcome, property-list state, shell settings, health result, and
+  holder; re-introducing either rule's bug fails it on exactly its own cases. Log lines are screened
+  before they are printed (`doctor.screen_for_sharing`) because the output is meant to be pasted publicly. `TestNothingIsClaimedThatTheEvidenceDoesNotAllow`
   runs every combination (7 agent states, 3 holders, 6 health results) against stated invariants. Seven
   review rounds on branch-by-branch logic each found the next unknown input; the table and that test are
   the close for the class, and a mutation of either rule fails it. A holder is a listener the loopback

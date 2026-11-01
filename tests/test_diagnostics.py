@@ -19,7 +19,7 @@ import pytest
 from tests.fakes.fake_run import FakeRun
 from usagedash import agent, cli, doctor
 from usagedash.config import Binaries, Settings, load_settings
-from usagedash.doctor import Finding, HealthKind, HealthResult, Level, PortHolder
+from usagedash.doctor import Finding, HealthKind, HealthResult, Level, PortHolder, SettingsOutcome
 from usagedash.errors import ConfigError, UsageDashError
 
 TAB = "\t"
@@ -321,14 +321,17 @@ class TestTheAgentChecks:
         assert finding.level is Level.FAIL
         assert str(paths.plist) in finding.details[0]
 
-    def test_a_service_whose_property_list_is_gone_is_a_warning_beside_the_running_finding(
+    def test_a_service_whose_property_list_is_gone_is_a_failure_beside_the_running_finding(
         self, paths: agent.AgentPaths, machine: Machine
     ) -> None:
         machine.environment = None
 
         findings = doctor.diagnose_agent(paths, None)
 
-        assert only(findings, "property list is gone").level is Level.WARN
+        gone = only(findings, "property list is gone")
+        assert gone.level is Level.FAIL
+        assert gone.details == ("Which port, data folder, and CLIs it uses cannot be known without it.",)
+        assert gone.fix == "Run `usagedash agent install` from the repository directory."
         assert only(findings, "is running the agent").level is Level.OK
 
     def test_a_running_agent_is_reported_with_its_pid_and_launchd_facts(
@@ -979,14 +982,24 @@ class TestWhetherTheDashboardAnswers:
         assert finding.fix is not None
         assert finding.fix.startswith("Quit that program, or move the dashboard: ")
 
-    def test_nothing_listening_with_no_agent_process_points_back_at_the_agent_problem(
-        self, paths: agent.AgentPaths, machine: Machine
+    @pytest.mark.parametrize(
+        "state",
+        [None, CRASHED, agent.ServiceState(None, None, None, None, None)],
+        ids=["not loaded", "crashed", "state not stated"],
+    )
+    def test_nothing_listening_without_a_running_agent_has_a_remedy_of_its_own_not_a_pointer_to_another_finding(
+        self, paths: agent.AgentPaths, machine: Machine, state: agent.ServiceState | None
     ) -> None:
-        machine.state, machine.health = CRASHED, HealthResult(HealthKind.REFUSED)
+        machine.state, machine.health = state, HealthResult(HealthKind.REFUSED)
 
         finding = only(doctor.diagnose_agent(paths, PORT), "Nothing is listening")
 
-        assert finding.fix == "Fix the agent problem above first."
+        assert finding.level is Level.FAIL
+        assert finding.fix == (
+            "Run `usagedash agent install`, then `usagedash doctor` again. If nothing listens after that, the "
+            "log lines below say why."
+        )
+        assert "above" not in finding.fix
 
     def test_a_listener_that_never_answers_is_a_failure(self, paths: agent.AgentPaths, machine: Machine) -> None:
         machine.health = HealthResult(HealthKind.TIMED_OUT)
@@ -1037,12 +1050,15 @@ class TestTheFullDiagnosis:
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
     ) -> None:
         machine.running()
-        machine.environment = None
         write_log(paths.server_log, "2026-11-01 INFO usagedash.api: collected\n")
+        gone = tmp_path / "gone" / "claude"
+        served = replace(settings_for(tmp_path), binaries=Binaries(str(gone), "codex", "grok"))
 
-        findings = doctor.diagnose(paths, shell=settings_for(tmp_path), served=None)
+        findings = doctor.diagnose(paths, shell=served, served=served)
 
-        assert titles(findings, Level.WARN) == ["launchd lists an agent whose property list is gone"]
+        warnings = titles(findings, Level.WARN)
+        assert len(warnings) == 1
+        assert warnings[0].startswith(f"claude: cannot use {gone}")
         assert titles(findings, Level.FAIL) == []
         assert not [title for title in titles(findings) if title.startswith("Last lines")]
 
@@ -1126,6 +1142,65 @@ class TestTheFullDiagnosis:
         ]
         assert "launchd is running the agent (pid 838)" in titles(findings)
 
+    @pytest.mark.parametrize("agent_case", AGENT_CASES, ids=[case[0] for case in AGENT_CASES])
+    @pytest.mark.parametrize("plist", ["present", "present but invalid", "absent", "untrusted"])
+    @pytest.mark.parametrize("shell_loads", [True, False], ids=["shell settings load", "shell settings do not load"])
+    @pytest.mark.parametrize("health_id", ["200", "refused"])
+    @pytest.mark.parametrize("holder_id", ["nobody seen", "the agent's pid"])
+    def test_a_report_without_a_failure_has_established_that_the_dashboard_answers(
+        self,
+        tmp_path: Path,
+        paths: agent.AgentPaths,
+        machine: Machine,
+        monkeypatch: pytest.MonkeyPatch,
+        agent_case: tuple[str, agent.ServiceState | None, bool, agent.AgentStatus],
+        plist: str,
+        shell_loads: bool,
+        health_id: str,
+        holder_id: str,
+    ) -> None:
+        case_id, state, reachable, _ = agent_case
+        if reachable:
+            machine.state = state
+        else:
+
+            def unreachable(_paths: agent.AgentPaths) -> agent.ServiceState | None:
+                raise agent.AgentError("launchctl print could not be run: FileNotFoundError")
+
+            monkeypatch.setattr(agent, "service_state", unreachable)
+        served: SettingsOutcome = None
+        if plist == "untrusted":
+
+            def untrusted(_paths: agent.AgentPaths) -> dict[str, str] | None:
+                raise agent.AgentError("another account could change it")
+
+            monkeypatch.setattr(agent, "installed_environment", untrusted)
+            served = agent.AgentError("another account could change it")
+        elif plist == "absent":
+            machine.environment = None
+        elif plist == "present but invalid":
+            machine.environment = {"USAGEDASH_PORT": "80"}
+            served = ConfigError("port must be between 1024 and 65535, got 80")
+        else:
+            machine.environment = {"USAGEDASH_PORT": str(PORT)}
+            served = settings_for(tmp_path)
+        machine.health, machine.holder = HEALTHS[health_id], HOLDERS[holder_id]
+        shell = settings_for(tmp_path) if shell_loads else ConfigError("port must be an integer")
+
+        findings = doctor.diagnose(paths, shell=shell, served=served)
+
+        if not doctor.has_failure(findings):
+            assert machine.probed == [f"http://127.0.0.1:{PORT}/healthz"]
+            assert health_id == "200"
+        nothing_installed = plist == "absent" and case_id == "not loaded"
+        if machine.probed and not isinstance(served, Settings):
+            assert shell_loads
+            assert nothing_installed
+        for finding in findings:
+            if finding.level is Level.FAIL:
+                assert finding.fix
+                assert "above" not in finding.fix
+
     def test_a_loaded_agent_with_no_property_list_is_not_diagnosed_with_this_shells_settings(
         self, tmp_path: Path, paths: agent.AgentPaths, machine: Machine
     ) -> None:
@@ -1135,7 +1210,8 @@ class TestTheFullDiagnosis:
         findings = doctor.diagnose(paths, shell=settings_for(tmp_path, 9123), served=None)
 
         assert machine.probed == []
-        assert only(findings, "property list is gone").level is Level.WARN
+        assert only(findings, "property list is gone").level is Level.FAIL
+        assert doctor.has_failure(findings) is True
         assert not [title for title in titles(findings) if "data directory" in title]
         assert not [title for title in titles(findings) if title.startswith(("claude:", "codex:", "grok:"))]
 
@@ -1704,9 +1780,50 @@ class TestReadingALog:
 
     def test_a_very_long_line_is_cut(self, tmp_path: Path) -> None:
         log = tmp_path / "log"
-        log.write_text("y" * 1000 + "\n")
+        log.write_text("word " * 300 + "\n")
 
-        assert doctor.tail_lines(log) == ["y" * doctor.MAX_LOG_LINE_CHARACTERS + "…"]
+        shown = doctor.tail_lines(log)
+
+        assert shown == [("word " * 300)[: doctor.MAX_LOG_LINE_CHARACTERS] + "…"]
+
+    def test_a_credential_or_an_email_address_in_a_log_line_is_replaced_before_it_is_shown(
+        self, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "log"
+        log.write_text("owner@example.com used api_key=sk-test-value on /api/state\nAccepted GET /api/state: ok\n")
+
+        assert doctor.tail_lines(log) == [
+            "<email> used api_key=<redacted> on /api/state",
+            "Accepted GET /api/state: ok",
+        ]
+
+    @pytest.mark.parametrize(
+        ("line", "screened"),
+        [
+            ("Accepted GET /api/state: signature", "Accepted GET /api/state: signature"),
+            ("cannot read access-token: PermissionError", "cannot read access-token: PermissionError"),
+            (
+                "/Users/greg/.venv/lib/python3.13/site-packages/usagedash/cli.py",
+                "/Users/greg/.venv/lib/python3.13/site-packages/usagedash/cli.py",
+            ),
+            ("owner@example.com failed", "<email> failed"),
+            ("first.last+tag@mail.example.co.uk failed", "<email> failed"),
+            ("Authorization: Bearer abcdef", "Authorization: <redacted> <redacted>"),
+            ("sent bearer abcdef now", "sent Bearer <redacted> now"),
+            ("api_key=sk-test-value", "api_key=<redacted>"),
+            ("API-KEY: sk-test-value", "API-KEY: <redacted>"),
+            ("password: hunter2", "password: <redacted>"),
+            ("passwd = hunter2", "passwd = <redacted>"),
+            ("secret=abc", "secret=<redacted>"),
+            ("a" * 32, "<redacted>"),
+            ("a" * 31, "a" * 31),
+            ("sha " + "0123456789abcdef" * 4, "sha <redacted>"),
+            ("owner@example.com api_key=abc", "<email> api_key=<redacted>"),
+            ("", ""),
+        ],
+    )
+    def test_screening_replaces_what_could_be_a_credential_and_nothing_else(self, line: str, screened: str) -> None:
+        assert doctor.screen_for_sharing(line) == screened
 
 
 class TestFindingWhoHoldsAPort:

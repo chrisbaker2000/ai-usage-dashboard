@@ -167,6 +167,28 @@ def _loopback_holder(output: str) -> PortHolder | None:
     return None
 
 
+_EMAIL_ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_BEARER_VALUE = re.compile(r"(?i)\bbearer\s+\S+")
+_CREDENTIAL_ASSIGNMENT = re.compile(r"(?i)\b(authorization|api[_-]?key|secret|password|passwd)\b(\s*[=:]\s*)\S+")
+_TOKEN_LIKE = re.compile(r"[A-Za-z0-9_+=-]{32,}")
+REDACTED = "<redacted>"
+
+
+def screen_for_sharing(line: str) -> str:
+    """Replace what could be an email address or a credential in a log line that a user may post publicly.
+
+    The server and the launchd capture hold no credentials by design, but a crash before logging starts can put
+    anything Python printed into the capture. This is a net, not a promise: it removes email addresses, a value
+    after ``Bearer`` or after an ``authorization``, ``api_key``, ``secret``, or ``password`` assignment, and any
+    run of 32 or more token characters. A word such as ``token`` alone is left, so that ``cannot read
+    access-token: PermissionError`` still says what it says.
+    """
+    screened = _BEARER_VALUE.sub(f"Bearer {REDACTED}", line)
+    screened = _CREDENTIAL_ASSIGNMENT.sub(lambda match: f"{match.group(1)}{match.group(2)}{REDACTED}", screened)
+    screened = _EMAIL_ADDRESS.sub("<email>", screened)
+    return _TOKEN_LIKE.sub(REDACTED, screened)
+
+
 def _printable(text: str) -> str:
     """Make text safe to print: a control character in a log or a command name must not drive the terminal."""
     shown = "".join(character if character.isprintable() else " " if character == "\t" else "?" for character in text)
@@ -199,7 +221,7 @@ def tail_lines(path: Path, *, max_lines: int = LOG_TAIL_LINES, max_bytes: int = 
     lines = data[start - before :].decode("utf-8", errors="replace").splitlines()
     if not begins_a_line and lines:
         lines = lines[1:]
-    return [_printable(line) for line in lines[-max_lines:]]
+    return [_printable(screen_for_sharing(line)) for line in lines[-max_lines:]]
 
 
 def system_findings() -> list[Finding]:
@@ -565,7 +587,14 @@ def _agent_findings(paths: AgentPaths) -> AgentView:
         )
         return AgentView([not_loaded], None, installed, AgentStatus.STOPPED)
     if installed is None and not plist_untrusted:
-        findings.append(Finding(Level.WARN, "launchd lists an agent whose property list is gone", fix=install_fix))
+        findings.append(
+            Finding(
+                Level.FAIL,
+                "launchd lists an agent whose property list is gone",
+                ("Which port, data folder, and CLIs it uses cannot be known without it.",),
+                install_fix,
+            )
+        )
     findings.append(_running_finding(state))
     return AgentView(findings, state, installed, state.status)
 
@@ -645,7 +674,13 @@ def _answer_findings(port: int, view: AgentView) -> list[Finding]:
         ]
     if health.kind is HealthKind.REFUSED:
         return [
-            Finding(Level.FAIL, f"Nothing is listening on port {port}", detail, "Fix the agent problem above first.")
+            Finding(
+                Level.FAIL,
+                f"Nothing is listening on port {port}",
+                detail,
+                "Run `usagedash agent install`, then `usagedash doctor` again. If nothing listens after that, the "
+                "log lines below say why.",
+            )
         ]
     if relation is Relation.AGENT and view.pid is not None:
         return [
@@ -778,7 +813,7 @@ def diagnose(paths: AgentPaths, *, shell: SettingsOutcome, served: SettingsOutco
     """
     findings = [*system_findings(), *settings_findings(shell, served)]
     view = _agent_findings(paths)
-    nothing_is_installed = served is None and view.state is None
+    nothing_is_installed = served is None and view.state is None and view.status is AgentStatus.STOPPED
     effective = (
         served
         if isinstance(served, Settings)
