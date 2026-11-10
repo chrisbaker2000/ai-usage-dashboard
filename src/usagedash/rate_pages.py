@@ -8,13 +8,18 @@ What each reader takes, as seen on 2026-11-10:
 
 - Claude: the table headed ``Name | Input | Output | 5m writes | 1h writes | Hits and refreshes``.
   The cache write is the 5-minute price. A row that continues the model above it (Haiku 5.5's
-  price above 100,000 prompt tokens) has fewer cells and is not read. A model is named
+  price above 100,000 prompt tokens) starts with a price and is not read. A model is named
   ``Claude Fable 5.2`` and stored as ``claude-fable-5-2``.
-- OpenAI: every table under the tab label ``Standard`` that has ``Model``, ``Input``, and
-  ``Output`` columns and no ``Modality`` or ``Training`` column. The cache write is the 30-minute
-  price. Batch, Fast, and Ultrafast tables carry their own labels and are not read.
+- OpenAI: every table under the tab label ``Standard`` that has a ``Model`` column and no
+  ``Modality`` or ``Training`` column; one of those without ``Input`` and ``Output`` refuses the
+  page. The cache write is the 30-minute price. Batch, Fast, and Ultrafast tables carry their own
+  labels and are not read.
 - xAI: the text table headed ``Input | Cached | Output | Input | Cached | Output``. The first
   three prices are the short-context ones. It publishes no cache-write price.
+
+In each table a row of one cell is a section label and states no rate. Any other row must have one
+cell for each column and name a model, or the page is refused: skipping it would leave that model's
+rate as it was while the page was reported as read.
 """
 
 import re
@@ -44,7 +49,8 @@ _CLAUDE_HEADER = ("Name", "Input", "Output", "5m writes", "1h writes", "Hits and
 _XAI_HEADER = ("Input", "Cached", "Output", "Input", "Cached", "Output")
 _XAI_ROW_CELLS = 8
 _OPENAI_LABEL = "Standard"
-_OPENAI_REQUIRED = frozenset({"Model", "Input", "Output"})
+_OPENAI_MODEL_COLUMN = "Model"
+_OPENAI_REQUIRED = frozenset({_OPENAI_MODEL_COLUMN, "Input", "Output"})
 _OPENAI_OTHER_PRODUCTS = frozenset({"Modality", "Training"})
 _OPENAI_CACHE_READ = "Cached input"
 _OPENAI_CACHE_WRITE = "30m write"
@@ -132,6 +138,24 @@ def _collected(models: Sequence[tuple[str, Rates]]) -> dict[str, Rates]:
     return rates_by_model
 
 
+def _is_section_label(row: tuple[str, ...]) -> bool:
+    """Report whether a row is one cell across the table, such as ``Additional models``: it states no rate."""
+    return len(row) == 1
+
+
+def _require_width(row: tuple[str, ...], width: int) -> None:
+    """Refuse a model row that does not have one cell per column.
+
+    Why refused and not skipped: a row that lost or gained a cell is a model whose rate would
+    silently stay as it was while the page was reported as read.
+
+    Raises:
+        ProviderSchemaError: if the row has another number of cells.
+    """
+    if len(row) != width:
+        raise ProviderSchemaError("a pricing page has a rate row without one cell for each column")
+
+
 def _rows_after(table: _Table, header: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
     return table.rows[table.rows.index(header) + 1 :]
 
@@ -157,8 +181,10 @@ def read_claude_rates(markdown: str) -> dict[str, Rates]:
     """
     models: list[tuple[str, Rates]] = []
     for row in _rows_after(_only_table_with(markdown, _CLAUDE_HEADER), _CLAUDE_HEADER):
-        if len(row) != len(_CLAUDE_HEADER):
+        # Why a row that starts with a price: it continues the model above at a longer prompt.
+        if _is_section_label(row) or row[0].startswith("$"):
             continue
+        _require_width(row, len(_CLAUDE_HEADER))
         name = _CLAUDE_NAME.search(row[0])
         if name is None:
             raise ProviderSchemaError("the Claude pricing page has a rate row that names no model")
@@ -168,12 +194,25 @@ def read_claude_rates(markdown: str) -> dict[str, Rates]:
 
 
 def _openai_header(table: _Table) -> tuple[str, ...] | None:
-    """Return the column-heading row of a standard text-token table, or None for any other table."""
+    """Return the column-heading row of a standard text-token table, or None for any other table.
+
+    A table under the standard label is a model table when a row of it has a ``Model`` column. One
+    for another product (images, audio, fine-tuning) is not read.
+
+    Raises:
+        ProviderSchemaError: if a standard model table lacks an input or output column. Skipping it
+            would store the other tables' rates and report the page as read.
+    """
     if table.label != _OPENAI_LABEL:
         return None
     for row in table.rows:
-        if set(row) >= _OPENAI_REQUIRED:
-            return None if _OPENAI_OTHER_PRODUCTS & set(row) else row
+        if _OPENAI_MODEL_COLUMN not in row:
+            continue
+        if _OPENAI_OTHER_PRODUCTS & set(row):
+            return None
+        if not set(row) >= _OPENAI_REQUIRED:
+            raise ProviderSchemaError("the OpenAI pricing page has a standard rate table without the expected columns")
+        return row
     return None
 
 
@@ -191,8 +230,9 @@ def read_openai_rates(markdown: str) -> dict[str, Rates]:
             continue
         column = {name: index for index, name in enumerate(header)}
         for row in _rows_after(table, header):
-            if len(row) != len(header):
+            if _is_section_label(row):
                 continue
+            _require_width(row, len(header))
             model = row[column["Model"]]
             if _MODEL_ID.fullmatch(model) is None:
                 raise ProviderSchemaError("the OpenAI pricing page has a rate row that names no model")
@@ -211,8 +251,9 @@ def read_xai_rates(markdown: str) -> dict[str, Rates]:
     """
     models: list[tuple[str, Rates]] = []
     for row in _rows_after(_only_table_with(markdown, _XAI_HEADER), _XAI_HEADER):
-        if len(row) != _XAI_ROW_CELLS:
+        if _is_section_label(row):
             continue
+        _require_width(row, _XAI_ROW_CELLS)
         link = _LINK_TEXT.match(row[0])
         if link is None or _MODEL_ID.fullmatch(link.group(1)) is None:
             raise ProviderSchemaError("the xAI pricing page has a rate row that names no model")

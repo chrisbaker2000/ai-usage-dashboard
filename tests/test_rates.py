@@ -241,6 +241,41 @@ class TestClaudePage:
 
         assert read_claude_rates(row) == {"claude-opus-9": Rates(10**10, 10**10, 10**10, 10**10)}
 
+    @pytest.mark.parametrize(
+        ("old", "new"),
+        [
+            pytest.param("| $8/ MTok | $40/ MTok |", "| $40/ MTok |", id="a named model a cell short"),
+            pytest.param("| $8/ MTok | $40/ MTok |", "| $8/ MTok | $8/ MTok | $40/ MTok |", id="a cell over"),
+            pytest.param(
+                "| Claude Opus 4.1 | $15/ MTok |", f"| {PAGE_TEXT_MARKER} | Claude Opus 4.1 |", id="no price first"
+            ),
+        ],
+    )
+    def test_a_model_row_without_one_cell_for_each_column_refuses_the_page(self, old: str, new: str) -> None:
+        assert old in CLAUDE_PAGE
+
+        with pytest.raises(ProviderSchemaError, match=r"without one cell for each column|names no model") as refusal:
+            read_claude_rates(CLAUDE_PAGE.replace(old, new, 1))
+
+        assert PAGE_TEXT_MARKER not in str(refusal.value)
+
+    def test_a_refused_row_stores_nothing_for_its_vendor_and_keeps_what_was_stored(
+        self, database: Database, now: datetime
+    ) -> None:
+        update_rates(database, Firecrawl(PAGES).client(), stored_key, lambda: now)
+        before = stored_models(database)
+        short = {
+            **PAGES,
+            RATE_PAGES[Provider.CLAUDE].url: CLAUDE_PAGE.replace("| $8/ MTok | $40/ MTok |", "| $40/ MTok |", 1),
+        }
+
+        report = update_rates(database, Firecrawl(short).client(), stored_key, lambda: now + timedelta(days=1))
+
+        assert report.pages[0].error == "a pricing page has a rate row without one cell for each column"
+        assert stored_models(database) == before
+        with database.read() as conn:
+            assert {row.fetched_at for row in db.list_fetched_rates(conn) if row.provider == "claude"} == {now}
+
     def test_one_model_listed_twice_is_read_once_when_the_rates_agree_and_refused_when_they_differ(self) -> None:
         cells = ("$5/ MTok", "$25/ MTok", "$6.25/ MTok", "$10/ MTok", "$0.50/ MTok")
         again = "| Claude Opus 5 | " + " | ".join(cells) + " |\n"
@@ -266,7 +301,7 @@ class TestOpenAIPage:
         with pytest.raises(ProviderSchemaError, match=r"lists no model"):
             read_openai_rates(batch_only)
 
-    def test_a_standard_table_of_something_else_and_a_row_of_another_width_are_not_read(self) -> None:
+    def test_a_standard_table_with_no_model_column_and_a_section_label_row_are_not_read(self) -> None:
         page = (
             "Standard\n\n| Tool | Pricing |\n| --- | --- |\n| Web search | $10.00 / 1k calls |\n"
             "\nStandard\n\n" + OPENAI_COLUMNS + "| gpt-6-luna | $0.10 | $0.50 | $0.01 | $0.125 | $0.25 |\n"
@@ -274,6 +309,31 @@ class TestOpenAIPage:
         )
 
         assert read_openai_rates(page) == {"gpt-6-luna": Rates(100_000, 10_000, 125_000, 500_000)}
+
+    @pytest.mark.parametrize("renamed", ["Input", "Output"])
+    def test_one_standard_model_table_without_a_price_column_refuses_the_page_though_another_reads(
+        self, renamed: str
+    ) -> None:
+        columns = "| Model | Input | Output | Cached input | 30m write | 12h write |"
+        page = OPENAI_PAGE.replace(columns, columns.replace(f"| {renamed} |", f"| {PAGE_TEXT_MARKER} |"), 1)
+
+        with pytest.raises(ProviderSchemaError, match=r"standard rate table without the expected columns") as refusal:
+            read_openai_rates(page)
+
+        assert PAGE_TEXT_MARKER not in str(refusal.value)
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            pytest.param("| gpt-6-astra | $10.00 | $50.00 | $1.00 | $12.50 |\n", id="a cell short"),
+            pytest.param("| gpt-6-astra | $10.00 | $50.00 | $1.00 | $12.50 | $25.00 | $1.00 |\n", id="a cell over"),
+        ],
+    )
+    def test_a_model_row_without_one_cell_for_each_column_refuses_the_page(self, row: str) -> None:
+        page = OPENAI_PAGE.replace("| gpt-6-astra | $10.00 | $50.00 | $1.00 | $12.50 | $25.00 |\n", row, 1)
+
+        with pytest.raises(ProviderSchemaError, match=r"without one cell for each column"):
+            read_openai_rates(page)
 
     def test_a_standard_table_without_cache_columns_states_no_cache_price(self) -> None:
         page = "Standard\n\n| Model | Input | Output |\n| --- | --- | --- |\n| gpt-9 | $1.00 | $2.00 |\n"
@@ -296,7 +356,7 @@ class TestXaiPage:
             "grok-4.5": Rates(2 * MILLION, 300_000, None, 6 * MILLION),
         }
 
-    def test_a_row_of_another_width_is_not_read(self) -> None:
+    def test_a_section_label_row_is_not_read(self) -> None:
         page = (
             XAI_HEADER
             + "| [grok-4.7](https://example.test/models/grok-4.7) | 500k | $2.00 | $0.50 | $6.00 | $4.00 | $1.00 "
@@ -304,6 +364,22 @@ class TestXaiPage:
         )
 
         assert read_xai_rates(page) == {"grok-4.7": Rates(2 * MILLION, 500_000, None, 6 * MILLION)}
+
+    @pytest.mark.parametrize(
+        "cells",
+        [
+            pytest.param("500k | $2.00 | $0.50 | $6.00 | $4.00 | $1.00", id="a cell short"),
+            pytest.param("500k | $2.00 | $0.50 | $6.00 | $4.00 | $1.00 | $12.00 | $1.00", id="a cell over"),
+        ],
+    )
+    def test_a_model_row_without_one_cell_for_each_column_refuses_the_page(self, cells: str) -> None:
+        page = XAI_PAGE + ""
+        row = f"| [grok-4.5](https://example.test/models/grok-4.5) <br>Long context ≥ 200k tokens | {cells} |\n"
+        start = page.index("| [grok-4.5]")
+        broken = page[:start] + row + page[page.index("\n", start) + 1 :]
+
+        with pytest.raises(ProviderSchemaError, match=r"without one cell for each column"):
+            read_xai_rates(broken)
 
     def test_a_page_without_the_text_table_is_refused(self) -> None:
         with pytest.raises(ProviderSchemaError, match=r"exactly one table"):
