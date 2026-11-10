@@ -27,7 +27,9 @@ function installDocument({ token, origin } = {}) {
       this.children = children;
     },
   });
-  for (const id of ['token-body', 'measure', 'refresh', 'load-error', 'updated']) nodes.set(id, element());
+  for (const id of ['token-body', 'measure', 'refresh', 'check-rates', 'load-error', 'updated']) {
+    nodes.set(id, element());
+  }
   globalThis.document = {
     body: element(),
     getElementById: (id) => nodes.get(id) ?? null,

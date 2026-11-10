@@ -17,6 +17,9 @@ import {
   niceCeiling,
   parseTokenReport,
   quotaUsageReading,
+  rateSourceText,
+  rateUpdateRefusalText,
+  rateUpdateSummary,
   refreshStatusText,
   roundedRetailTotal,
   shareOf,
@@ -985,6 +988,7 @@ function renderCosts(report) {
         {},
         accountColumn(account.provider, account.account_id),
         el('td', { text: model.model }),
+        el('td', { class: 'muted', text: rateSourceText(model.rate_source) }),
         modelCostCell(model),
         rateGapCell(model.unpriced_tokens),
       ),
@@ -1092,6 +1096,31 @@ async function requestRefresh(button) {
   }
 }
 
+/**
+ * Asks the dashboard to fetch the vendors' rates, says what changed, and reprices the token report.
+ *
+ * @param {HTMLButtonElement} button - Disabled until the update has answered, so one runs at a time.
+ */
+async function requestRateUpdate(button) {
+  const status = document.getElementById('rates-status');
+  button.disabled = true;
+  status.textContent = 'Checking the vendors’ pricing pages…';
+  try {
+    const response = await request('/api/rates/update', { method: 'POST', headers: CSRF_HEADERS });
+    // Why a body that is not JSON is no body: a refusal is then named by its status alone.
+    const body = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(rateUpdateRefusalText(response.status, body));
+    status.textContent = rateUpdateSummary(body);
+    failures.clear('rates');
+    await loadTokens();
+  } catch (error) {
+    status.textContent = '';
+    failures.report('rates', `Rates were not updated: ${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function start() {
   for (const button of document.querySelectorAll('.segment')) {
     button.addEventListener('click', () => {
@@ -1107,6 +1136,8 @@ function start() {
   });
   const refresh = document.getElementById('refresh');
   refresh.addEventListener('click', () => requestRefresh(refresh));
+  const checkRates = document.getElementById('check-rates');
+  checkRates.addEventListener('click', () => requestRateUpdate(checkRates));
   window.addEventListener('resize', renderTokens);
 
   loadState();

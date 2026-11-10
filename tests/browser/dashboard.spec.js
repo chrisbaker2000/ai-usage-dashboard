@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 
 import { expect, test } from '@playwright/test';
 
-import { demoState, mountDemo } from './demo.js';
+import { NO_KEY_DETAIL, RATE_UPDATE_REFUSED, RATE_UPDATE_UNREACHABLE, demoState, mountDemo } from './demo.js';
 
 test('social preview screenshot fits the shared-link image dimensions', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 640 });
@@ -157,6 +157,55 @@ test('keyboard navigation reaches the dashboard and account rename saves', async
   await expect(account.getByRole('heading', { name: 'Research' })).toBeVisible();
   await expect(account.getByRole('button', { name: 'Rename' })).toBeFocused();
   await expect(page.locator('#load-error')).toBeHidden();
+});
+
+test('check rates says what changed and reprices the model that had no rate', async ({ page }) => {
+  await mountDemo(page);
+  const modelCosts = page.locator('#cost-model-table tbody tr');
+  await page.getByText('Cost by model').click();
+  const unlisted = modelCosts.filter({ hasText: 'unlisted-demo-model' });
+  await expect(unlisted).toContainText('No rate');
+  await expect(modelCosts.filter({ hasText: 'Listed' }).first()).toBeVisible();
+
+  await page.getByRole('button', { name: 'Check rates' }).click();
+
+  await expect(page.locator('#rates-status')).toContainText(
+    '1 newly priced: unlisted-demo-model (input $2, cache read $0.2, output $10)',
+  );
+  await expect(page.locator('#rates-status')).toContainText('has no change');
+  await expect(unlisted).toContainText('Fetched');
+  await expect(unlisted).not.toContainText('No rate');
+  await expect(page.getByRole('button', { name: 'Check rates' })).toBeEnabled();
+  await expect(page.locator('#load-error')).toBeHidden();
+});
+
+test('a refused or unreachable rate check says why, changes no cost, and a retry clears it', async ({ page }) => {
+  await mountDemo(page, { rateUpdates: [RATE_UPDATE_REFUSED, RATE_UPDATE_UNREACHABLE] });
+  const button = page.getByRole('button', { name: 'Check rates' });
+  const failure = page.locator('#load-error');
+  const status = page.locator('#rates-status');
+  await page.getByText('Cost by model').click();
+  const unlisted = page.locator('#cost-model-table tbody tr').filter({ hasText: 'unlisted-demo-model' });
+  const totalBefore = await page.locator('#cost-table tbody tr').last().innerText();
+
+  await button.click();
+  await expect(failure).toHaveText(`Rates were not updated: ${NO_KEY_DETAIL}`);
+  await expect(status).toHaveText('');
+  await expect(button).toBeEnabled();
+  await expect(unlisted).toContainText('No rate');
+  expect(await page.locator('#cost-table tbody tr').last().innerText()).toBe(totalBefore);
+
+  await button.click();
+  await expect(failure).toContainText('Rates were not updated: ');
+  await expect(failure).not.toContainText(NO_KEY_DETAIL);
+  await expect(button).toBeEnabled();
+  await expect(unlisted).toContainText('No rate');
+
+  await button.click();
+  await expect(status).toContainText('1 newly priced: unlisted-demo-model');
+  await expect(failure).toBeHidden();
+  await expect(unlisted).toContainText('Fetched');
+  await expect(button).toBeEnabled();
 });
 
 test('token filters and refresh use the signed demo API', async ({ page }) => {

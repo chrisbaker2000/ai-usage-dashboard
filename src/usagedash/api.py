@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import enum
 import logging
+import threading
 import time
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from datetime import datetime, timedelta
@@ -61,9 +62,20 @@ from usagedash.access import (
 from usagedash.collector import Collector, CycleAlreadyRunningError, CycleReport, describe_without_messages
 from usagedash.config import Settings
 from usagedash.db import Database, SnapshotRow, SourceStatusRow
-from usagedash.errors import SealedBodyError, UsageDashError
-from usagedash.pricing import COST_NOTE, CURRENCY, MICRODOLLAR, PRICED_ON, price_model_rows
+from usagedash.errors import CredentialUnavailableError, SealedBodyError, UsageDashError
+from usagedash.pricing import (
+    CURRENCY,
+    MICRODOLLAR,
+    NO_FETCHED_RATES,
+    PRICED_ON,
+    ModelCost,
+    Rates,
+    RateTable,
+    cost_note,
+    price_model_rows,
+)
 from usagedash.projection import AccountView, Advice, ProviderView, Thresholds, WindowView, build_provider_views
+from usagedash.rate_updates import RateUpdater, RateUpdateReport, fetched_rate_table
 from usagedash.timeutil import Clock, in_utc, to_iso
 from usagedash.tokens import RangeKey, build_token_report
 
@@ -102,6 +114,10 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 """The methods that change nothing. A request by any other method must have come from the dashboard's page."""
 REQUEST_PARTS = frozenset({"query", "path", "body", "header", "cookie"})
 """The parts of a request FastAPI names first in the location of a validation failure."""
+RATE_SOURCE_FETCHED = "fetched"
+RATE_SOURCE_LISTED = "listed"
+RATE_UPDATES_UNAVAILABLE_MESSAGE = "This process cannot update rates."
+RATE_UPDATE_RUNNING_MESSAGE = "A rate update is already running."
 HISTORY_WINDOW = timedelta(days=7)
 MIN_REFRESH_SPACING = timedelta(seconds=20)
 MAX_LABEL_LENGTH = 60
@@ -316,17 +332,30 @@ def _counts_text(counts: dict[str, int]) -> dict[str, str]:
     return {field: str(counts[field]) for field in _COUNT_FIELDS}
 
 
-def _costs_json(models: list[dict[str, Any]]) -> dict[str, Any]:
+def _rate_source(model: ModelCost) -> str | None:
+    """Name where a model row's rate came from, or None for a row with no rate."""
+    if model.fetched:
+        return RATE_SOURCE_FETCHED
+    return None if model.microdollars is None else RATE_SOURCE_LISTED
+
+
+def _costs_json(
+    models: list[dict[str, Any]], fetched: RateTable = NO_FETCHED_RATES, fetched_on: str | None = None
+) -> dict[str, Any]:
     """Price the report's model rows at the published short-prompt rates.
+
+    ``fetched`` holds the rates read from the vendors' pricing pages, which replace the listed ones,
+    and ``fetched_on`` the day of the latest of them.
 
     Why not inside the token report: the chart, the model table, and the provider tiles are one sum of
     token counts, and a price is not a token count.
     """
     return {
         "priced_on": PRICED_ON,
+        "fetched_on": fetched_on,
         "currency": CURRENCY,
         "unit": MICRODOLLAR,
-        "note": COST_NOTE,
+        "note": cost_note(fetched_on),
         "accounts": [
             {
                 "provider": account.provider,
@@ -339,16 +368,53 @@ def _costs_json(models: list[dict[str, Any]]) -> dict[str, Any]:
                         "priced": model.microdollars is not None,
                         "microdollars": None if model.microdollars is None else str(model.microdollars),
                         "unpriced_tokens": str(model.unpriced_tokens),
+                        "rate_source": _rate_source(model),
                     }
                     for model in account.models
                 ],
             }
-            for account in price_model_rows(models)
+            for account in price_model_rows(models, fetched)
         ],
     }
 
 
-def _token_report_json(report: dict[str, Any]) -> dict[str, Any]:
+def _rates_json(rates: Rates | None) -> dict[str, str | None] | None:
+    """Write one model's rates as decimal text, in microdollars per million tokens. None is no rate."""
+    if rates is None:
+        return None
+    return {
+        component: None if (rate := rates.component(component)) is None else str(rate)
+        for component in ("input", "cache_read", "cache_write", "output")
+    }
+
+
+def _rate_update_json(report: RateUpdateReport) -> dict[str, Any]:
+    """Return a rate update as the page gets it: one entry per vendor page, read or not."""
+    return {
+        "checked_at": to_iso(report.checked_at),
+        "pages": [
+            {
+                "provider": page.provider.value,
+                "display_name": page.provider.display_name,
+                "models_read": page.models_read,
+                "error": page.error,
+                "changes": [
+                    {
+                        "model": change.model,
+                        "previous": _rates_json(change.previous),
+                        "fetched": _rates_json(change.fetched),
+                    }
+                    for change in page.changes
+                ],
+            }
+            for page in report.pages
+        ],
+    }
+
+
+def _token_report_json(
+    report: dict[str, Any], fetched: RateTable = NO_FETCHED_RATES, fetched_on: str | None = None
+) -> dict[str, Any]:
     """Return a token report as the page gets it.
 
     Each account id is text (see ``_text_id``) and each token count is decimal text (see ``_counts_text``).
@@ -370,7 +436,7 @@ def _token_report_json(report: dict[str, Any]) -> dict[str, Any]:
             for model in report["models"]
         ],
         "provider_totals": [{**item, "totals": _counts_text(item["totals"])} for item in report["provider_totals"]],
-        "costs": _costs_json(report["models"]),
+        "costs": _costs_json(report["models"], fetched, fetched_on),
     }
 
 
@@ -953,10 +1019,12 @@ def create_app(
     *,
     access_token: str,
     run_collector: bool = True,
+    rate_updater: RateUpdater | None = None,
 ) -> FastAPI:
     """Build the application. With ``run_collector`` the collection loop runs for the app's lifetime.
 
-    ``access_token`` is the secret every ``/api`` request must present.
+    ``access_token`` is the secret every ``/api`` request must present. ``rate_updater`` fetches and
+    stores the vendors' rates when the page asks; without one the page's request is answered 503.
 
     Raises:
         ValueError: if ``access_token`` is not well formed. An empty one would match a request that
@@ -1002,6 +1070,7 @@ def create_app(
     # part of the request is decoded or validated (see ``guarded_route_class``).
     verifier = RequestVerifier(access_token)
     sealer = BodySealer(access_token)
+    rate_update_running = threading.Lock()
     api = APIRouter(prefix=API_PREFIX, route_class=guarded_route_class(access_token, verifier, sealer))
 
     app.add_exception_handler(RequestValidationError, _refuse_invalid_request)
@@ -1047,7 +1116,29 @@ def create_app(
     ) -> dict[str, Any]:
         zone = _time_zone(tz)
         with database.read() as conn:
-            return _token_report_json(build_token_report(conn, db.list_accounts(conn), range_key, zone, clock()))
+            fetched, fetched_on = fetched_rate_table(db.list_fetched_rates(conn))
+            report = build_token_report(conn, db.list_accounts(conn), range_key, zone, clock())
+        return _token_report_json(report, fetched, fetched_on)
+
+    @api.post("/rates/update")
+    def update_rates() -> dict[str, Any]:
+        """Fetch the vendors' pricing pages and store the rates they state, one update at a time.
+
+        Why not async: the update waits on the network for up to minutes, and a plain function runs
+        on a worker thread, off the event loop.
+        """
+        if rate_updater is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, RATE_UPDATES_UNAVAILABLE_MESSAGE)
+        if not rate_update_running.acquire(blocking=False):
+            raise HTTPException(status.HTTP_409_CONFLICT, RATE_UPDATE_RUNNING_MESSAGE)
+        try:
+            return _rate_update_json(rate_updater())
+        except CredentialUnavailableError as error:
+            # Why the message is passed on: it is this package's own text and names the command that
+            # stores a key. A typed error's message holds nothing a provider supplied.
+            raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from None
+        finally:
+            rate_update_running.release()
 
     @api.post("/refresh", status_code=status.HTTP_202_ACCEPTED)
     async def refresh() -> dict[str, str]:

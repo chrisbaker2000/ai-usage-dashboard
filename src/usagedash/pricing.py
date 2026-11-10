@@ -15,6 +15,10 @@ and are not priced again.
 
 ``grok-4.7-build`` and ``grok-4.6-build`` are the subscription CLI's names for ``grok-4.7``
 and ``grok-4.6``. Grok 4.7 Fast is a different product and is not priced.
+
+A rate fetched from a vendor's pricing page (``rate_updates``) replaces the listed one for its
+model, and prices a model this module does not list. The listed table is what a model is
+priced from until a fetch has stated its rate.
 """
 
 import re
@@ -41,6 +45,18 @@ COST_NOTE = (
     "Each figure is rounded to the nearest dollar. "
     "This is not a subscription charge."
 )
+"""The note while every model is priced from the listed table."""
+
+
+def cost_note(fetched_on: str | None) -> str:
+    """Return the note shown with the costs. ``fetched_on`` is the day of the latest fetched rate, if any."""
+    if fetched_on is None:
+        return COST_NOTE
+    return (
+        f"{COST_NOTE} A model marked fetched uses the rate its vendor's pricing page stated when "
+        f"rates were last checked, {fetched_on}, in place of the listed one."
+    )
+
 
 _MICRODOLLARS_PER_DOLLAR = 1_000_000
 _TOKENS_PER_MILLION = 1_000_000
@@ -53,8 +69,16 @@ _GROK_ALIASES = {"grok-4.7-build": "grok-4.7", "grok-4.6-build": "grok-4.6"}
 
 
 def _usd(text: str) -> int:
-    """Return one published USD-per-million price in microdollars per million tokens."""
-    amount = Decimal(text)
+    """Return one published USD-per-million price in microdollars per million tokens.
+
+    Raises:
+        ValueError: if the text is not a number, is negative or not finite, or is finer than one
+            microdollar.
+    """
+    try:
+        amount = Decimal(text)
+    except ArithmeticError:
+        raise ValueError("a published price is not a non-negative amount") from None
     if not amount.is_finite() or amount < 0:
         raise ValueError("a published price is not a non-negative amount")
     micro = amount * _MICRODOLLARS_PER_DOLLAR
@@ -64,7 +88,7 @@ def _usd(text: str) -> int:
 
 
 @dataclass(frozen=True, slots=True)
-class _Rates:
+class Rates:
     """Microdollars per million tokens. None is a published blank, not a price of zero."""
 
     input: int | None
@@ -82,8 +106,13 @@ class _Rates:
         return rates[name]
 
 
-def _listed(input_usd: str, cache_read: str | None, cache_write: str | None, output_usd: str) -> _Rates:
-    return _Rates(
+def rates_from_usd(input_usd: str, cache_read: str | None, cache_write: str | None, output_usd: str) -> Rates:
+    """Build rates from published USD-per-million prices given as decimal text. None is a blank cell.
+
+    Raises:
+        ValueError: if a price is not a non-negative amount of whole microdollars.
+    """
+    return Rates(
         _usd(input_usd),
         None if cache_read is None else _usd(cache_read),
         None if cache_write is None else _usd(cache_write),
@@ -91,19 +120,19 @@ def _listed(input_usd: str, cache_read: str | None, cache_write: str | None, out
     )
 
 
-def _claude(input_usd: str, output_usd: str, cache_hit_denominator: int) -> _Rates:
+def _claude(input_usd: str, output_usd: str, cache_hit_denominator: int) -> Rates:
     """Build Claude rates. The cache hit is input divided by ``cache_hit_denominator``."""
     input_rate = _usd(input_usd)
     numerator, denominator = _FIVE_MINUTE_WRITE
     write = input_rate * numerator
     if write % denominator or input_rate % cache_hit_denominator:
         raise ValueError("a Claude cache price is not a whole number of microdollars")
-    return _Rates(input_rate, input_rate // cache_hit_denominator, write // denominator, _usd(output_usd))
+    return Rates(input_rate, input_rate // cache_hit_denominator, write // denominator, _usd(output_usd))
 
 
-def _grok(input_usd: str, cache_read: str, output_usd: str) -> _Rates:
+def _grok(input_usd: str, cache_read: str, output_usd: str) -> Rates:
     """Build an xAI text rate. The text table publishes no cache-write price."""
-    return _listed(input_usd, cache_read, None, output_usd)
+    return rates_from_usd(input_usd, cache_read, None, output_usd)
 
 
 # Cache-hit denominator: 10 is 0.1x input, 20 is 0.05x, 40 is 0.025x.
@@ -135,7 +164,7 @@ _CLAUDE = {
 
 # Short-context standard rates. A None cell is the vendor's "-", and the long-context columns are not used.
 _CODEX = {
-    model: _listed(*prices)
+    model: rates_from_usd(*prices)
     for model, prices in {
         "gpt-6-astra": ("10.00", "1.00", "12.50", "50.00"),
         "gpt-6.1-sol": ("2.00", "0.10", "2.50", "10.00"),
@@ -207,17 +236,36 @@ _RATES = {
 }
 
 
-def _published_model(provider: Provider, model: str) -> str:
+RateTable = Mapping[tuple[Provider, str], Rates]
+"""Rates by provider and price-list model id."""
+
+NO_FETCHED_RATES: RateTable = {}
+
+
+def _published_model(provider: Provider, model: str, fetched: RateTable) -> str:
     """Return the price-list id for a stored model name."""
     if provider is Provider.GROK:
         return _GROK_ALIASES.get(model, model)
     if provider is Provider.CLAUDE:
-        # Why only when the family is listed: a trailing date is a snapshot of that family.
-        # A dated id whose family is not listed stays unmatched instead of losing the date.
+        # Why only when the family has a rate: a trailing date is a snapshot of that family.
+        # A dated id whose family has none stays unmatched instead of losing the date.
         snapshot = _CLAUDE_SNAPSHOT.fullmatch(model)
-        if snapshot is not None and (provider, snapshot.group("family")) in _RATES:
-            return snapshot.group("family")
+        if snapshot is not None:
+            family = (provider, snapshot.group("family"))
+            if family in fetched or family in _RATES:
+                return snapshot.group("family")
     return model
+
+
+def rate_in_use(provider: Provider, model: str, fetched: RateTable = NO_FETCHED_RATES) -> tuple[Rates | None, bool]:
+    """Return the rate a stored model name is priced at, and whether that rate was fetched.
+
+    A fetched rate replaces the listed one for its model. A model with neither has no rate.
+    """
+    key = (provider, _published_model(provider, model, fetched))
+    if key in fetched:
+        return fetched[key], True
+    return _RATES.get(key), False
 
 
 def _whole(value: object, what: str) -> int:
@@ -237,7 +285,7 @@ def _component_counts(totals: object) -> tuple[dict[str, int], int]:
     return counts, total
 
 
-def _microdollars(rates: _Rates, counts: Mapping[str, int]) -> int | None:
+def _microdollars(rates: Rates, counts: Mapping[str, int]) -> int | None:
     """Return the row cost, or None when a used component has no published price.
 
     Why once for the row: rounding each component would drop any piece under half a
@@ -257,11 +305,15 @@ def _microdollars(rates: _Rates, counts: Mapping[str, int]) -> int | None:
 
 @dataclass(frozen=True, slots=True)
 class ModelCost:
-    """One model row. ``microdollars`` is None when the row is left out of the dollar total."""
+    """One model row. ``microdollars`` is None when the row is left out of the dollar total.
+
+    ``fetched`` says the row's rate came from a vendor's pricing page and not from the listed table.
+    """
 
     model: str
     microdollars: int | None
     unpriced_tokens: int
+    fetched: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,13 +336,16 @@ class _AccountDraft:
     unpriced_tokens: int = 0
 
 
-def price_model_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[AccountCost, ...]:
+def price_model_rows(
+    rows: Sequence[Mapping[str, Any]], fetched: RateTable = NO_FETCHED_RATES
+) -> tuple[AccountCost, ...]:
     """Price each model row and sum the priced rows by account, in the order given.
 
-    A model with no listed rate, and a model that used a component with no listed rate, is
-    returned with ``microdollars`` None and its token total in ``unpriced_tokens``. A priced
-    row contributes its rounded cost and no unpriced tokens. The account cost is the sum of
-    those rounded row costs, so it matches the rows.
+    A model's rate is the fetched one when ``fetched`` holds it, and the listed one otherwise.
+    A model with no rate, and a model that used a component with no rate, is returned with
+    ``microdollars`` None and its token total in ``unpriced_tokens``. A priced row contributes
+    its rounded cost and no unpriced tokens. The account cost is the sum of those rounded row
+    costs, so it matches the rows.
 
     Raises:
         ValueError: if a provider, model, account id, or token count is not the shape the
@@ -311,12 +366,13 @@ def price_model_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[AccountCost, ..
             provider = Provider(provider_name)
         except ValueError:
             provider = None
-        rates = None if provider is None else _RATES.get((provider, _published_model(provider, model)))
+        rates, was_fetched = (None, False) if provider is None else rate_in_use(provider, model, fetched)
         microdollars = None if rates is None else _microdollars(rates, counts)
         cost = ModelCost(
             model=model,
             microdollars=microdollars,
             unpriced_tokens=0 if microdollars is not None else total,
+            fetched=was_fetched,
         )
         key = (provider_name, account_id)
         draft = drafts.get(key)

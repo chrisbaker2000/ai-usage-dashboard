@@ -1888,6 +1888,7 @@ class TestSchemaLifecycle:
         with database.connect() as conn:
             db.upsert_account(conn, make_identity(), now)
             conn.execute("DROP TABLE recorded_login_boundaries")
+            conn.execute("DROP TABLE fetched_rates")
             conn.execute("PRAGMA user_version = 1")
 
         database.initialize()
@@ -1895,11 +1896,28 @@ class TestSchemaLifecycle:
         with database.connect() as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
             assert len(db.list_accounts(conn)) == 1
-            present = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?",
-                ("table", "recorded_login_boundaries"),
-            ).fetchone()
-            assert present is not None
+            for table in ("recorded_login_boundaries", "fetched_rates"):
+                present = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?", ("table", table)
+                ).fetchone()
+                assert present is not None
+
+    def test_a_version_2_database_gains_the_fetched_rate_table_and_keeps_its_data(
+        self, tmp_path: Path, now: datetime
+    ) -> None:
+        database = Database(tmp_path / "data" / "usage.db")
+        database.initialize()
+        with database.connect() as conn:
+            db.upsert_account(conn, make_identity(), now)
+            conn.execute("DROP TABLE fetched_rates")
+            conn.execute("PRAGMA user_version = 2")
+
+        database.initialize()
+
+        with database.connect() as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+            assert len(db.list_accounts(conn)) == 1
+            assert db.list_fetched_rates(conn) == []
 
     def test_a_schema_version_with_no_migration_is_left_unchanged(
         self, database: Database, monkeypatch: pytest.MonkeyPatch

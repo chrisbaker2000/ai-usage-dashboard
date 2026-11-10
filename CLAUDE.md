@@ -20,6 +20,8 @@ prettier --write src/usagedash/static tests/js package.json
 .venv/bin/usagedash open
 .venv/bin/usagedash doctor
 .venv/bin/usagedash login claude --name work
+.venv/bin/usagedash rates set-key                          # store the Firecrawl key in the login keychain
+.venv/bin/usagedash rates update                           # fetch the vendors' rates; `rates reset` undoes it
 .venv/bin/usagedash agent install
 .venv/bin/usagedash agent uninstall
 .venv/bin/usagedash agent status
@@ -42,6 +44,8 @@ stylesheet and the modules inline, so a browser reload alone keeps the old copie
 | `projection.py`                        | Pure logic: window state, reset roll-forward, pace, stay/switch/wait advice                         |
 | `tokens.py`                            | Hourly rows → chart buckets in the viewer's time zone                                               |
 | `pricing.py`                           | Published short-prompt API rates and the microdollar cost of a model row                            |
+| `rate_pages.py`                        | Pure readers: one vendor pricing page as markdown → that vendor's rates, or a schema error          |
+| `rate_updates.py`                      | Fetch the pricing pages through Firecrawl on request, store what they state, report what changed    |
 | `api.py`                               | FastAPI app, security checks, background collection loop                                            |
 | `access.py`                            | The access token, challenge-bound request and answer signatures, the body seal, and the page file   |
 | `validation.py`                        | Shared strict pydantic base, field types, and safe provider-schema error translation                |
@@ -532,12 +536,41 @@ ValidError` passing it, because a type name cannot be told from a value by its s
   (`http.build_client`).
 - **Every token total comes from one query** (`db.token_usage`), filtered once in `tokens.py`, so the
   chart series, per-model totals, and per-provider totals cannot disagree.
-- **Retail API cost is the published short-prompt standard rate** (`pricing.py`), attached in
-  `api._token_report_json` and not inside `build_token_report`. Costs are integer microdollars,
+- **Retail API cost is the published short-prompt standard rate** (`pricing.py`, the listed table or
+  a fetched rate), attached in `api._token_report_json` and not inside `build_token_report`. Costs are integer microdollars,
   rounded half up once per model row; an account total is the sum of those rows. The page then shows
   each figure to the nearest dollar, and the all-accounts row adds those rounded figures. A used
   component with no published rate leaves the whole model out of the dollar total. Reasoning is part
   of output and is not priced again. The assumptions are in `docs/known-limitations.md`.
+- **A fetched rate replaces the listed one for its model; nothing fetches on a schedule.** The page's
+  Check rates button (`POST /api/rates/update`) and `usagedash rates update` run
+  `rate_updates.update_rates`: one Firecrawl scrape per vendor pricing page, as markdown, with
+  `maxAge: 0`. Rates are stored per provider and model (`fetched_rates`), and
+  `pricing.rate_in_use` prefers a stored rate to the listed table. A model a page stops listing
+  keeps its rate. `usagedash rates reset` clears them. One rate per model prices every hour shown;
+  there is no rate history. This is the only request to a host that is not a vendor's own, and it
+  holds a public URL and the Firecrawl key, nothing about an account.
+- **A pricing page is read by its table headings, in code, and refused whole when they are not
+  there** (`rate_pages.py`). Firecrawl's model-based JSON extraction was tried on 2026-11-10 and
+  withdrawn: it returned a price as a sentence, `null` where the page stated a price, and one xAI
+  model of eight. Do not bring it back to survive a layout change; fix the reader and add the page's
+  new shape to `tests/test_rates.py`. A price cell must start with a dollar amount that does not run
+  on into a digit, a point, or a comma, so `$5.0000001` and `$1,000` are refused, not shortened.
+  Nothing is skipped by its shape: a row needs one cell per column and a model name, a heading may
+  not repeat, and a table line needs both outer delimiters (`_require_width`,
+  `_is_broken_table_line`). The two rows passed over are named by their text
+  (`_CLAUDE_SECTION_LABELS`, `_CLAUDE_LONG_PROMPT`). A new kind of row a vendor adds is added there
+  by name; do not go back to skipping by cell count, which reported a page as read while a model
+  kept its old rate. A model a page omits altogether keeps its rate; `docs/known-limitations.md`
+  ("Fetched rates") records why that is accepted.
+- **The Firecrawl key is a login-keychain item, written by `security` itself**
+  (`rate_updates.store_key_interactively`, service `usagedash-firecrawl`, account from the user
+  database). `-w` as the last argument makes `security` prompt, so the key is never an argument, in
+  the environment, in the config file, or in the database. Without a key the update is a
+  `CredentialUnavailableError` naming `usagedash rates set-key`, which the API answers as 409.
+- **One rate update at a time per process** (`api.create_app`, a non-blocking lock around the
+  route): a second request while one runs is answered 409 and spends no credits. The route is a
+  plain function, so the minutes it can wait on the network are spent on a worker thread.
 - **The limit on token counts belongs to the store, not to `TokenCounts`.** One stored row holds at
   most `MAX_TOKEN_COUNT` per count (a `CHECK` in the schema, and checked before a value reaches
   SQLite). `db.token_usage` adds rows up in Python because SQLite's `SUM` fails past 64 bits, and
@@ -799,8 +832,10 @@ ValidError` passing it, because a type name cannot be told from a value by its s
   whole environment.
 - The vendor payload shapes are undocumented. When one changes, the source reports `ProviderSchemaError`
   under "Data sources"; fix the pydantic model in the matching provider module and add a test.
-- `SCHEMA_VERSION` is 2. A database stamped at version 1 gains `recorded_login_boundaries` in the
-  same transaction as the version stamp (`Database._migrate`). The next schema change adds another
+- `SCHEMA_VERSION` is 3. A database stamped at version 1 gains `recorded_login_boundaries`, and one
+  at version 2 gains `fetched_rates`, each in the same transaction as its version stamp
+  (`Database._migrate`). A build from before a migration refuses the newer database, so restart the
+  agent after updating (`usagedash agent install`). The next schema change adds another
   migration instead of editing `_SCHEMA_STATEMENTS` for a database that is already stamped. A
   database created by a build from before the initial merge has an older table layout under version
   1; move it aside and let the dashboard create a new one.

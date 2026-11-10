@@ -221,7 +221,8 @@ different project.
 ## The retail API cost uses the short-prompt standard rate
 
 The token section prices each account's tokens at the vendors' published pay-as-you-go rates
-(`pricing.py`, tables read 2026-10-08). The figure is what those tokens would have cost on the API.
+(`pricing.py`, tables read 2026-10-08, and any rates fetched since; see
+[Fetched rates](#fetched-rates)). The figure is what those tokens would have cost on the API.
 It is not the subscription charge.
 
 An hourly total does not say which requests were long-context, batch, fast, priority, or served from
@@ -250,3 +251,35 @@ total. No partial price is shown for that model.
 
 This is the comparable API price hourly totals can support. They do not carry the request-level
 qualifiers the vendors bill on.
+
+### Fetched rates
+
+**Check rates** and `usagedash rates update` read each vendor's pricing page through Firecrawl and
+store the rates it states (`rate_updates.py`, `rate_pages.py`). A fetched rate replaces the listed one
+for its model, and prices a model the listed table lacks. The same assumptions hold for a fetched
+rate: short prompt, standard tier, Claude's 5-minute cache write, OpenAI's 30-minute cache write.
+
+- **A rate applies to every hour shown, not from the day it changed.** The store keeps one rate per
+  model. After a vendor changes a price, usage from before the change is priced at the new rate too.
+  A per-hour rate history was judged not worth it for a comparison figure.
+- **A model a page no longer lists keeps the last rate it had.** Vendors drop older models from the
+  page while their tokens are still in the store. `usagedash rates reset` removes every fetched rate.
+- **The readers follow each page's layout as it was on 2026-11-10.** Each finds one table by its
+  column headings. A page whose layout changed is refused whole and reported next to the button; its
+  vendor's rates stay as they were. It is not read loosely: Firecrawl's model-based extraction was
+  tried first and returned a price as a sentence, a blank where the page stated a price, and one
+  model of eight.
+- **A damaged table refuses the page; a model the page leaves out is not damage.** A row must have
+  one cell for each column and name a model, a heading may not repeat, and a table line must be
+  delimited at both ends. Only Claude's `Additional models` label and its longer-prompt row directly
+  under a model are passed over. What a reader cannot tell apart is a page that omits a model by
+  mistake from one where the vendor stopped listing it: both are a row that is not there. That model
+  keeps the rate it has, which is the behaviour for a dropped model above. Refusing a page for
+  listing fewer models than the last fetch was considered and not done: vendors do remove models,
+  and every later check would then be refused.
+- **OpenAI's page lists only its current models.** An older model, `gpt-5.6-sol` for one, is priced
+  from the listed table until the code changes.
+- **A Claude model is named from its display name**: `Claude Fable 5.2` becomes `claude-fable-5-2`.
+  A model whose id does not follow its name that way is not matched and stays on the listed table.
+- **Nothing checks rates on a schedule.** Each check spends Firecrawl credits (one per page) and is
+  the only request this dashboard sends to a host that is not a vendor's own, so it runs when asked.

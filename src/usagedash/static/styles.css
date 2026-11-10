@@ -925,6 +925,15 @@ code {
   line-height: 1.45;
 }
 
+.rate-update {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+
 .cost-section .data-table td:first-child,
 .cost-section .data-table tbody th {
   white-space: normal;

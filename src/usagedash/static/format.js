@@ -258,6 +258,91 @@ export function refreshStatusText(status) {
   return status === HTTP_TOO_MANY_REQUESTS ? 'Refresh attempted moments ago' : 'Collecting…';
 }
 
+const RATE_SOURCE_LABELS = Object.freeze({ fetched: 'Fetched', listed: 'Listed' });
+const NO_RATE_SOURCE_LABEL = '—';
+
+/**
+ * Names where a model's rate came from: the dashboard's listed table, or the vendor's pricing page.
+ * @param {string | null | undefined} source - `fetched`, `listed`, or nothing for a model with no rate.
+ * @returns {string}
+ */
+export function rateSourceText(source) {
+  return Object.hasOwn(RATE_SOURCE_LABELS, source ?? '') ? RATE_SOURCE_LABELS[source] : NO_RATE_SOURCE_LABEL;
+}
+
+const RATE_COMPONENTS = Object.freeze([
+  ['input', 'input'],
+  ['cache_read', 'cache read'],
+  ['cache_write', 'cache write'],
+  ['output', 'output'],
+]);
+const MICRODOLLAR_DIGITS = 6;
+const NO_RATE_TEXT = 'none';
+
+/**
+ * Writes one rate, sent as microdollars per million tokens in decimal text, as exact dollars.
+ * @param {string | null} rate - Null is the vendor's blank cell.
+ * @returns {string} For example `$8`, `$0.125`, or `none`.
+ */
+export function formatRate(rate) {
+  if (rate === null) return NO_RATE_TEXT;
+  const microdollars = parseDecimal(rate, 'rate');
+  const fraction = String(microdollars % MICRODOLLARS_PER_DOLLAR)
+    .padStart(MICRODOLLAR_DIGITS, '0')
+    .replace(/0+$/, '');
+  const dollars = microdollars / MICRODOLLARS_PER_DOLLAR;
+  return fraction === '' ? `$${dollars}` : `$${dollars}.${fraction}`;
+}
+
+function changeText(change) {
+  const parts = [];
+  for (const [field, label] of RATE_COMPONENTS) {
+    const now = change.fetched[field];
+    if (change.previous === null) {
+      if (now !== null) parts.push(`${label} ${formatRate(now)}`);
+    } else if (change.previous[field] !== now) {
+      parts.push(`${label} ${formatRate(change.previous[field])} → ${formatRate(now)}`);
+    }
+  }
+  return `${change.model} (${parts.join(', ')})`;
+}
+
+function pageUpdateText(page) {
+  if (page.error !== null) return `${page.display_name} was not updated (${page.error})`;
+  if (page.changes.length === 0) return `${page.display_name} has no change`;
+  const added = page.changes.filter((change) => change.previous === null).length;
+  const changed = page.changes.length - added;
+  const counts = [];
+  if (added > 0) counts.push(`${added} newly priced`);
+  if (changed > 0) counts.push(`${changed} changed`);
+  return `${page.display_name} has ${counts.join(' and ')}: ${page.changes.map(changeText).join('; ')}`;
+}
+
+/**
+ * What the page says after a rate update: for each vendor, what changed or why it was not read.
+ * @param {{pages: Array<{display_name: string, error: string | null,
+ *   changes: Array<{model: string, previous: object | null}>}>}} result - The update as the API sent it.
+ * @returns {string}
+ * @throws {TypeError} When the result does not list its pages.
+ */
+export function rateUpdateSummary(result) {
+  if (result === null || typeof result !== 'object' || !Array.isArray(result.pages)) {
+    throw new TypeError('a rate update does not list its pages');
+  }
+  return `Rates checked. ${result.pages.map(pageUpdateText).join('. ')}.`;
+}
+
+/**
+ * Why a rate update was refused. The dashboard explains a refusal it made itself in `detail`.
+ * @param {number} status - The response status.
+ * @param {unknown} body - The response body, already parsed.
+ * @returns {string}
+ */
+export function rateUpdateRefusalText(status, body) {
+  const detail = body !== null && typeof body === 'object' ? body.detail : undefined;
+  return typeof detail === 'string' && detail !== '' ? detail : `the dashboard responded ${status}`;
+}
+
 const NICE_AXIS_STEPS = [1, 2, 4, 5, 8, 10];
 const BAR_CORNER_RADIUS = 4;
 
