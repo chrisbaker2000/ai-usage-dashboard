@@ -16,6 +16,7 @@ import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.seeds import seed_accounts_and_usage
 from usagedash import cli, db, rate_updates
 from usagedash.api import _token_report_json, create_app
 from usagedash.config import Settings, load_settings
@@ -1104,14 +1105,48 @@ class TestRateUpdateRoute:
     def test_the_token_report_is_priced_with_the_stored_fetched_rates(
         self, client: TestClient, database: Database, now: datetime
     ) -> None:
-        assert client.get("/api/tokens").json()["costs"]["fetched_on"] is None
+        accounts = seed_accounts_and_usage(database, now)
+
+        def models_of(costs: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+            return {
+                (account["account_id"], model["model"]): model
+                for account in costs["accounts"]
+                for model in account["models"]
+            }
+
+        before = client.get("/api/tokens").json()["costs"]
+        assert before["fetched_on"] is None
+        assert {model["rate_source"] for model in models_of(before).values()} == {None}
+        assert {account["priced_microdollars"] for account in before["accounts"]} == {"0"}
+
         with database.connect() as conn:
-            db.store_fetched_rates(conn, [FetchedRateRow("claude", "claude-fable-5-2", 8, 2, 10, 40, now)])
+            db.store_fetched_rates(
+                conn, [FetchedRateRow("claude", "model-x", 2 * MILLION, MILLION, 3 * MILLION, 4 * MILLION, now)]
+            )
 
         costs = client.get("/api/tokens").json()["costs"]
 
         assert costs["fetched_on"] == "2026-10-03"
         assert costs["note"] == cost_note("2026-10-03")
+        priced = models_of(costs)
+        # The active account used 11 input, 100 cache read, 5 cache write, and 21 output tokens of model-x.
+        assert priced[(str(accounts["active"]), "model-x")] == {
+            "model": "model-x",
+            "priced": True,
+            "microdollars": "221",
+            "unpriced_tokens": "0",
+            "rate_source": "fetched",
+        }
+        assert priced[("0", "model-x")]["microdollars"] == "2200"
+        assert priced[(str(accounts["other"]), "model-y")] == {
+            "model": "model-y",
+            "priced": False,
+            "microdollars": None,
+            "unpriced_tokens": "10",
+            "rate_source": None,
+        }
+        by_account = {account["account_id"]: account["priced_microdollars"] for account in costs["accounts"]}
+        assert by_account == {str(accounts["active"]): "221", str(accounts["other"]): "0", "0": "2200"}
 
 
 class TestRatesCommand:
