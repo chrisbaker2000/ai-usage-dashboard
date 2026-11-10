@@ -316,14 +316,30 @@ describe('the retail cost section', () => {
             account_id: '7',
             priced_microdollars: '1500000',
             unpriced_tokens: '0',
-            models: [{ model: 'claude-opus-4-7', priced: true, microdollars: '1000000', unpriced_tokens: '0' }],
+            models: [
+              {
+                model: 'claude-opus-4-7',
+                priced: true,
+                microdollars: '1000000',
+                unpriced_tokens: '0',
+                rate_source: 'fetched',
+              },
+            ],
           },
           {
             provider: 'grok',
             account_id: '8',
             priced_microdollars: '500000',
             unpriced_tokens: '1000',
-            models: [{ model: 'grok-4.7-build', priced: false, microdollars: null, unpriced_tokens: '1000' }],
+            models: [
+              {
+                model: 'grok-4.7-build',
+                priced: false,
+                microdollars: null,
+                unpriced_tokens: '1000',
+                rate_source: null,
+              },
+            ],
           },
         ],
       },
@@ -346,11 +362,11 @@ describe('the retail cost section', () => {
     assert.deepEqual(
       modelRows.map((tableRow) => tableRow.children.map(cellLabel)),
       [
-        ['Work Claude', 'claude-opus-4-7', '$1', '0'],
-        ['Standing Grok', 'grok-4.7-build', 'No rate', '1,000'],
+        ['Work Claude', 'claude-opus-4-7', 'Fetched', '$1', '0'],
+        ['Standing Grok', 'grok-4.7-build', '—', 'No rate', '1,000'],
       ],
     );
-    assert.equal(modelRows[1].children[2].className, 'numeric muted');
+    assert.equal(modelRows[1].children[3].className, 'numeric muted');
     assert.equal(elements.get('cost-note').textContent, report.costs.note);
   });
 });

@@ -207,6 +207,13 @@ model with no published rate for a component that was used stays in the table, u
 and is left out of the dollar total. The figure is not the subscription charge. The rate assumptions
 are in [docs/known-limitations.md](docs/known-limitations.md).
 
+The rates come from a table in the code. **Check rates** reads the three vendors' pricing pages
+through [Firecrawl](https://www.firecrawl.dev) and stores the rates they state, so a new model gets a
+price and a changed price replaces the listed one. It needs a Firecrawl API key, stored once with
+`.venv/bin/usagedash rates set-key`; without one the button says so and nothing else changes. Under
+**Cost by model**, the **Rate** column says whether a model's rate is the listed one or a fetched one.
+`.venv/bin/usagedash rates reset` goes back to the listed table.
+
 **Data sources** lists each login the collector asked, and any waiting state or error. A source that
 is logged out, and has nothing to report yet, is not a failure.
 
@@ -270,6 +277,12 @@ Run these from the repository directory.
 | `.venv/bin/usagedash agent uninstall`     | Stop the agent and remove its property list. Data and logs stay.         |
 | `.venv/bin/usagedash serve`               | Run the server in the foreground. The agent is the normal way to run it. |
 | `.venv/bin/usagedash login <tool> --name` | Sign in an extra account. `<tool>` is `claude`, `codex`, or `grok`.      |
+| `.venv/bin/usagedash rates set-key`       | Store a Firecrawl API key in the login keychain. The keychain tool asks. |
+| `.venv/bin/usagedash rates update`        | Fetch the vendors' rates now and print what changed.                     |
+| `.venv/bin/usagedash rates reset`         | Remove every fetched rate and price from the listed table again.         |
+
+`rates update` exits 1 when a pricing page could not be fetched or read; the other pages are still
+stored.
 
 `collect` exits 0 when every source is fine, including a source that is logged out and has nothing
 to report. It exits 1 when a source would show as waiting or as an error. Ctrl-C exits 130.
@@ -472,6 +485,11 @@ token and checks the dashboard's signature on each answer. The token stays in th
 It is not put in the browser's storage, a cookie, a URL, or a command argument, and the page does
 not send it on the wire. Account credentials stay in the vendor CLIs. The dashboard does not copy a
 working credential into its own store.
+
+One request leaves this Mac for a host that is not a vendor's own, and only when you ask for it:
+**Check rates** and `usagedash rates update` send Firecrawl the addresses of three public pricing
+pages and your Firecrawl key. Nothing about an account, a token count, or a cost is sent. The key is
+an item in the login keychain; it is not in the config file or the database.
 
 A config file or data directory that another macOS account could replace is refused. A standing home
 that another account could change is refused, because the vendor CLI reads its configuration from

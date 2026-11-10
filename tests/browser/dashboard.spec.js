@@ -159,6 +159,26 @@ test('keyboard navigation reaches the dashboard and account rename saves', async
   await expect(page.locator('#load-error')).toBeHidden();
 });
 
+test('check rates says what changed and reprices the model that had no rate', async ({ page }) => {
+  await mountDemo(page);
+  const modelCosts = page.locator('#cost-model-table tbody tr');
+  await page.getByText('Cost by model').click();
+  const unlisted = modelCosts.filter({ hasText: 'unlisted-demo-model' });
+  await expect(unlisted).toContainText('No rate');
+  await expect(modelCosts.filter({ hasText: 'Listed' }).first()).toBeVisible();
+
+  await page.getByRole('button', { name: 'Check rates' }).click();
+
+  await expect(page.locator('#rates-status')).toContainText(
+    '1 newly priced: unlisted-demo-model (input $2, cache read $0.2, output $10)',
+  );
+  await expect(page.locator('#rates-status')).toContainText('has no change');
+  await expect(unlisted).toContainText('Fetched');
+  await expect(unlisted).not.toContainText('No rate');
+  await expect(page.getByRole('button', { name: 'Check rates' })).toBeEnabled();
+  await expect(page.locator('#load-error')).toBeHidden();
+});
+
 test('token filters and refresh use the signed demo API', async ({ page }) => {
   await mountDemo(page);
   await page.getByRole('button', { name: 'Last 24 hours' }).click();

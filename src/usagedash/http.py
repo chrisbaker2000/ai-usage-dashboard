@@ -44,17 +44,52 @@ def fetch_json_object(client: httpx2.Client, url: str, headers: Mapping[str, str
             non-200 status (429 carries ``retry_after_seconds``).
         ProviderSchemaError: if the body is not a JSON object.
     """
-    unsendable = sorted(name for name, value in headers.items() if not _is_header_text(value))
-    if unsendable:
-        raise ProviderRequestError(
-            f"{service} request not sent: {', '.join(unsendable)} holds characters a header cannot carry"
-        )
+    _refuse_unsendable_headers(headers, service)
     try:
         response = client.get(url, headers=dict(headers))
     except httpx2.HTTPError as error:
         # Why no cause is chained: the transport's own message can quote a header it was sending, and
         # the Authorization header is the bearer token. A chained cause is printed with every traceback.
         raise ProviderRequestError(f"{service} request failed: {type(error).__name__}") from None
+    return _json_object_of(response, service)
+
+
+def post_json_object(
+    client: httpx2.Client,
+    url: str,
+    headers: Mapping[str, str],
+    body: Mapping[str, Any],
+    *,
+    service: str,
+    timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """POST a JSON body to a URL and return the answer's JSON-object body.
+
+    Raises:
+        CredentialExpiredError: on 401/403, meaning the key is expired or revoked.
+        ProviderRequestError: if a header value cannot be sent, on a transport failure, or on any other
+            non-200 status (429 carries ``retry_after_seconds``).
+        ProviderSchemaError: if the answer's body is not a JSON object.
+    """
+    _refuse_unsendable_headers(headers, service)
+    try:
+        response = client.post(url, headers=dict(headers), json=dict(body), timeout=timeout_seconds)
+    except httpx2.HTTPError as error:
+        # Why no cause is chained: as for a GET, the transport's message can quote the key it was sending.
+        raise ProviderRequestError(f"{service} request failed: {type(error).__name__}") from None
+    return _json_object_of(response, service)
+
+
+def _refuse_unsendable_headers(headers: Mapping[str, str], service: str) -> None:
+    unsendable = sorted(name for name, value in headers.items() if not _is_header_text(value))
+    if unsendable:
+        raise ProviderRequestError(
+            f"{service} request not sent: {', '.join(unsendable)} holds characters a header cannot carry"
+        )
+
+
+def _json_object_of(response: httpx2.Response, service: str) -> dict[str, Any]:
+    """Return a 200 answer's JSON-object body, or raise the typed error its status or body stands for."""
     status = response.status_code
     if status in (401, 403):
         raise CredentialExpiredError(f"{service} rejected the stored token (HTTP {status})")

@@ -128,6 +128,10 @@
           <section class="cost-section" aria-labelledby="cost-heading">
             <h3 id="cost-heading">Retail API cost</h3>
             <p id="cost-note" class="cost-note"></p>
+            <div class="rate-update">
+              <button id="check-rates" type="button" class="button">Check rates</button>
+              <span id="rates-status" class="muted" role="status"></span>
+            </div>
             <div class="table-wrap">
               <table id="cost-table" class="data-table">
                 <caption>
@@ -154,6 +158,9 @@
                     <tr>
                       <th scope="col">Account</th>
                       <th scope="col">Model</th>
+                      <th scope="col" title="Listed in the dashboard, or fetched from the vendor's pricing page">
+                        Rate
+                      </th>
                       <th scope="col" class="numeric">Retail cost</th>
                       <th scope="col" class="numeric" title="Tokens with no published rate">Unpriced</th>
                     </tr>

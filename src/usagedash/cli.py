@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import fcntl
+import functools
 import logging
 import os
 import sqlite3
@@ -11,6 +12,7 @@ import threading
 import time
 import webbrowser
 from collections.abc import Callable, Mapping, Sequence
+from decimal import Decimal
 from io import TextIOWrapper
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -32,16 +34,19 @@ from usagedash.config import (
     config_file,
     load_settings,
 )
-from usagedash.db import Database
+from usagedash.credentials import read_keychain_secret
+from usagedash.db import Database, clear_fetched_rates
 from usagedash.errors import ConfigError, UsageDashError
 from usagedash.executables import canonical_executable as _canonical_executable_only_this_account_can_change
 from usagedash.http import build_client
 from usagedash.models import Provider
 from usagedash.paths import same_directory
+from usagedash.pricing import Rates
 from usagedash.private import (
     ensure_no_ancestor_lets_another_account_replace,
     open_private_file,
 )
+from usagedash.rate_updates import store_key_interactively, update_rates
 from usagedash.timeutil import utc_now
 from usagedash.wiring import build_collector
 
@@ -60,6 +65,7 @@ INSTALL_READY_WAIT_SECONDS = 20.0
 """How long `usagedash agent install` waits for the new agent to answer before it reports a failure."""
 INSTALL_READY_POLL_SECONDS = 0.5
 FAILED_SOURCE_SEVERITIES = frozenset({"warning", "error"})
+MICRODOLLARS_PER_DOLLAR = 1_000_000
 
 
 class MessageFreeHandlerErrors(logging.Handler):
@@ -239,7 +245,14 @@ def _serve(settings: Settings) -> int:
     access_token = ensure_access_token(settings.data_dir)
     with build_client() as client:
         collector = build_collector(settings, database, client, utc_now)
-        app = create_app(settings, database, collector, utc_now, access_token=access_token)
+        app = create_app(
+            settings,
+            database,
+            collector,
+            utc_now,
+            access_token=access_token,
+            rate_updater=functools.partial(update_rates, database, client, read_keychain_secret, utc_now),
+        )
         server = uvicorn.Server(
             uvicorn.Config(
                 app,
@@ -433,6 +446,59 @@ def _status(settings: Settings) -> int:
         if source["severity"] != "ok":
             print(f"[{source['severity']}] {source['source_id']} {source['kind']}: {source['message']}")
     return EXIT_OK
+
+
+def _dollars_per_million(rate: int | None) -> str:
+    """Write a rate, held in microdollars per million tokens, as dollars. A blank cell is a dash."""
+    return "-" if rate is None else f"${Decimal(rate) / MICRODOLLARS_PER_DOLLAR:f}"
+
+
+def _rates_line(rates: Rates) -> str:
+    return (
+        f"input {_dollars_per_million(rates.input)}, cache read {_dollars_per_million(rates.cache_read)}, "
+        f"cache write {_dollars_per_million(rates.cache_write)}, output {_dollars_per_million(rates.output)}"
+    )
+
+
+def _update_rates(settings: Settings) -> int:
+    """Fetch the vendors' rates, store them, and print what changed. Fails if any page was not read."""
+    database = _open_database(settings)
+    with build_client() as client:
+        report = update_rates(database, client, read_keychain_secret, utc_now)
+    for page in report.pages:
+        if page.error is not None:
+            print(f"{page.provider.display_name}: not updated: {page.error}")
+            continue
+        print(f"{page.provider.display_name}: {page.models_read} model(s) read, {len(page.changes)} changed")
+        for change in page.changes:
+            print(f"  {change.model}: {_rates_line(change.fetched)}")
+            if change.previous is None:
+                print("    had no rate")
+            else:
+                print(f"    was {_rates_line(change.previous)}")
+    return EXIT_FAILURE if report.has_failures else EXIT_OK
+
+
+def _reset_rates(settings: Settings) -> int:
+    with _open_database(settings).connect() as conn:
+        removed = clear_fetched_rates(conn)
+    print(f"Removed {removed} fetched rate(s). Every model is priced from the listed table again.")
+    return EXIT_OK
+
+
+def _set_rates_key() -> int:
+    print("Paste the Firecrawl API key when the keychain tool asks for the password. It is not shown.")
+    store_key_interactively()
+    print("Stored. `usagedash rates update` and the dashboard's Check rates button now use it.")
+    return EXIT_OK
+
+
+def _rates(settings: Settings, action: str) -> int:
+    if action == "update":
+        return _update_rates(settings)
+    if action == "reset":
+        return _reset_rates(settings)
+    return _set_rates_key()
 
 
 def _pinned_executables(executables: Mapping[str, str]) -> dict[str, str]:
@@ -669,6 +735,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     login_parser.add_argument("provider", choices=[provider.value for provider in Provider])
     login_parser.add_argument("--name", default=DEFAULT_LOGIN_NAME, help="short label for this login (a-z, 0-9, -)")
+    rates_parser = commands.add_parser(
+        "rates", help="update the retail API rates from the vendors' pricing pages, through Firecrawl"
+    )
+    rates_parser.add_argument("action", choices=["update", "set-key", "reset"])
     return parser
 
 
@@ -717,6 +787,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _status(settings)
         if arguments.command == "login":
             return _login(settings, Provider(arguments.provider), arguments.name)
+        if arguments.command == "rates":
+            return _rates(settings, arguments.action)
         return _install_agent(settings)
     except UsageDashError as error:
         print(f"error: {_one_line(str(error))}", file=sys.stderr)

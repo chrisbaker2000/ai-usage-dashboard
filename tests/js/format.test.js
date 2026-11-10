@@ -15,12 +15,16 @@ import {
   formatCompactCount,
   formatCount,
   formatDuration,
+  formatRate,
   formatRoundedDollars,
   formatWholeDollars,
   niceCeiling,
   parseCount,
   parseTokenReport,
   quotaUsageReading,
+  rateSourceText,
+  rateUpdateRefusalText,
+  rateUpdateSummary,
   refreshStatusText,
   retailTotal,
   roundedRetailTotal,
@@ -383,6 +387,88 @@ describe('what a refresh tells the page', () => {
   it('does not call a spaced attempt a successful collection', () => {
     assert.equal(refreshStatusText(429), 'Refresh attempted moments ago');
     assert.equal(refreshStatusText(202), 'Collecting…');
+  });
+});
+
+describe('what a rate update tells the page', () => {
+  const page = (overrides) => ({ display_name: 'Claude', error: null, changes: [], ...overrides });
+  const rates = { input: '8000000', cache_read: '200000', cache_write: '10000000', output: '40000000' };
+
+  it('says which models were newly priced and which changed, with each rate before and after', () => {
+    const noCacheWrite = { input: '2000000', cache_read: '500000', cache_write: null, output: '6000000' };
+    const summary = rateUpdateSummary({
+      pages: [
+        page({
+          changes: [
+            { model: 'claude-fable-5-2', previous: null, fetched: rates },
+            {
+              model: 'claude-opus-5',
+              previous: { input: '5000000', cache_read: '500000', cache_write: '6250000', output: '25000000' },
+              fetched: { input: '4000000', cache_read: '500000', cache_write: '5000000', output: '25000000' },
+            },
+          ],
+        }),
+        page({
+          display_name: 'Grok',
+          changes: [
+            { model: 'grok-5', previous: null, fetched: noCacheWrite },
+            { model: 'grok-4.7', previous: { ...noCacheWrite, cache_write: '125000' }, fetched: noCacheWrite },
+          ],
+        }),
+        page({ display_name: 'Codex' }),
+      ],
+    });
+
+    assert.equal(
+      summary,
+      'Rates checked. Claude has 1 newly priced and 1 changed: ' +
+        'claude-fable-5-2 (input $8, cache read $0.2, cache write $10, output $40); ' +
+        'claude-opus-5 (input $5 → $4, cache write $6.25 → $5). ' +
+        'Grok has 1 newly priced and 1 changed: grok-5 (input $2, cache read $0.5, output $6); ' +
+        'grok-4.7 (cache write $0.125 → none). Codex has no change.',
+    );
+  });
+
+  it('writes a rate as exact dollars, down to one microdollar', () => {
+    assert.equal(formatRate('0'), '$0');
+    assert.equal(formatRate('1'), '$0.000001');
+    assert.equal(formatRate('999999'), '$0.999999');
+    assert.equal(formatRate('1000000'), '$1');
+    assert.equal(formatRate('18750000'), '$18.75');
+    assert.equal(formatRate('9007199254740993000000'), '$9007199254740993');
+    assert.equal(formatRate(null), 'none');
+    for (const rate of [8, '8.5', '-1', '', undefined]) {
+      assert.throws(() => formatRate(rate), /a rate is not a decimal string/);
+    }
+  });
+
+  it('says a vendor whose page was not read was not updated, and why', () => {
+    const summary = rateUpdateSummary({
+      pages: [page({ display_name: 'Grok', error: 'Firecrawl returned HTTP 402' })],
+    });
+
+    assert.equal(summary, 'Rates checked. Grok was not updated (Firecrawl returned HTTP 402).');
+  });
+
+  it('refuses a result that does not list its pages', () => {
+    for (const result of [null, 'done', {}, { pages: 'none' }]) {
+      assert.throws(() => rateUpdateSummary(result), /does not list its pages/);
+    }
+  });
+
+  it('explains a refusal with the dashboard’s own detail, and by status when there is none', () => {
+    assert.equal(rateUpdateRefusalText(409, { detail: 'Store a key.' }), 'Store a key.');
+    for (const body of [null, 'text', {}, { detail: '' }, { detail: 7 }]) {
+      assert.equal(rateUpdateRefusalText(503, body), 'the dashboard responded 503');
+    }
+  });
+
+  it('names where a rate came from, and nothing for a model with no rate', () => {
+    assert.equal(rateSourceText('fetched'), 'Fetched');
+    assert.equal(rateSourceText('listed'), 'Listed');
+    for (const source of [null, undefined, '', 'toString', 'other']) {
+      assert.equal(rateSourceText(source), '—');
+    }
   });
 });
 

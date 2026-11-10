@@ -45,7 +45,7 @@ from usagedash.timeutil import (
     whole_second_not_before,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 CATEGORICAL_SLOT_COUNT = 8
 OVERFLOW_COLOR_SLOT = 0
 SNAPSHOT_RETENTION = timedelta(days=90)
@@ -77,6 +77,23 @@ CREATE TABLE recorded_login_boundaries (
   boundary_at TEXT NOT NULL,
   PRIMARY KEY (source_id, boundary_at)
 )
+"""
+
+MAX_STORED_RATE = 10**12
+"""The largest rate one row holds, in microdollars per million tokens: a million dollars a million."""
+_STORABLE_RATE = f"BETWEEN 0 AND {MAX_STORED_RATE}"
+
+_FETCHED_RATES = f"""
+CREATE TABLE fetched_rates (
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  input_rate INTEGER NOT NULL CHECK (input_rate {_STORABLE_RATE}),
+  cache_read_rate INTEGER CHECK (cache_read_rate {_STORABLE_RATE}),
+  cache_write_rate INTEGER CHECK (cache_write_rate {_STORABLE_RATE}),
+  output_rate INTEGER NOT NULL CHECK (output_rate {_STORABLE_RATE}),
+  fetched_at TEXT NOT NULL,
+  PRIMARY KEY (provider, model)
+) WITHOUT ROWID
 """
 
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -205,11 +222,12 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     ) WITHOUT ROWID
     """,
     _RECORDED_LOGIN_BOUNDARIES,
+    _FETCHED_RATES,
 )
 
-# Why a migration and not an edit of the version-1 statements: databases already stamped at version 1
-# never re-run those statements. The stamp moves only after this table exists.
-_MIGRATIONS: dict[int, tuple[str, ...]] = {1: (_RECORDED_LOGIN_BOUNDARIES,)}
+# Why a migration and not an edit of the earlier statements: a database already stamped at an earlier
+# version never re-runs those statements. The stamp moves only after the version's table exists.
+_MIGRATIONS: dict[int, tuple[str, ...]] = {1: (_RECORDED_LOGIN_BOUNDARIES,), 2: (_FETCHED_RATES,)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +276,22 @@ class SourceStatusRow:
     last_success_at: datetime | None
     error_type: str | None
     error_message: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FetchedRateRow:
+    """One model's rate as a vendor's pricing page stated it, in microdollars per million tokens.
+
+    A cache rate of None is the page's blank cell, not a price of zero.
+    """
+
+    provider: str
+    model: str
+    input_rate: int
+    cache_read_rate: int | None
+    cache_write_rate: int | None
+    output_rate: int
+    fetched_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -624,6 +658,63 @@ def rename_account(conn: sqlite3.Connection, account_id: int, label: str) -> boo
     """Set a user-chosen label. Returns False when no such account exists."""
     cursor = conn.execute("UPDATE accounts SET label = ?, label_is_custom = 1 WHERE id = ?", (label, account_id))
     return cursor.rowcount == 1
+
+
+def store_fetched_rates(conn: sqlite3.Connection, rows: Sequence[FetchedRateRow]) -> None:
+    """Store each fetched rate, replacing the one already held for the same provider and model.
+
+    A model the rows do not name keeps the rate it has: a vendor drops an older model from its
+    pricing page while its tokens are still in the store.
+
+    Raises:
+        ValueError: if a rate is negative or above ``MAX_STORED_RATE``, or a time cannot be expressed
+            in UTC. Checked before anything is written, so the rows are stored together or not at all.
+    """
+    for row in rows:
+        for rate in (row.input_rate, row.cache_read_rate, row.cache_write_rate, row.output_rate):
+            if rate is not None and not 0 <= rate <= MAX_STORED_RATE:
+                raise ValueError("a fetched rate is outside what the store holds")
+    conn.executemany(
+        "INSERT INTO fetched_rates "
+        "(provider, model, input_rate, cache_read_rate, cache_write_rate, output_rate, fetched_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (provider, model) DO UPDATE SET input_rate = excluded.input_rate, "
+        "cache_read_rate = excluded.cache_read_rate, cache_write_rate = excluded.cache_write_rate, "
+        "output_rate = excluded.output_rate, fetched_at = excluded.fetched_at",
+        [
+            (
+                row.provider,
+                row.model,
+                row.input_rate,
+                row.cache_read_rate,
+                row.cache_write_rate,
+                row.output_rate,
+                to_iso(in_utc(row.fetched_at)),
+            )
+            for row in rows
+        ],
+    )
+
+
+def list_fetched_rates(conn: sqlite3.Connection) -> list[FetchedRateRow]:
+    """Return every fetched rate, ordered by provider and model."""
+    return [
+        FetchedRateRow(
+            provider=row["provider"],
+            model=row["model"],
+            input_rate=row["input_rate"],
+            cache_read_rate=row["cache_read_rate"],
+            cache_write_rate=row["cache_write_rate"],
+            output_rate=row["output_rate"],
+            fetched_at=parse_iso(row["fetched_at"]),
+        )
+        for row in conn.execute("SELECT * FROM fetched_rates ORDER BY provider, model")
+    ]
+
+
+def clear_fetched_rates(conn: sqlite3.Connection) -> int:
+    """Remove every fetched rate, so each model is priced from the listed table again. Returns how many."""
+    return conn.execute("DELETE FROM fetched_rates").rowcount
 
 
 def list_accounts(conn: sqlite3.Connection) -> list[AccountRow]:

@@ -5,6 +5,8 @@ import { SIGNED_HEADER, TOKEN, answerSignatureOf, sealedAnswerOf, sha256 } from 
 const NOW = Date.parse('2026-10-20T15:00:00Z');
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
+const UNLISTED_ACCOUNT_ID = '6';
+const UNLISTED_MODEL = 'unlisted-demo-model';
 const iso = (offset = 0) => new Date(NOW + offset).toISOString();
 
 function quota(key, label, percent, resetHours, hours = 168) {
@@ -141,7 +143,7 @@ function totalCounts(rows) {
   );
 }
 
-function tokenReport(state, range) {
+function tokenReport(state, range, ratesWereFetched = false) {
   const bucketCount = range === '24h' ? 24 : range === '30d' ? 30 : 7;
   const interval = range === '24h' ? HOUR : DAY;
   const anchor = range === '24h' ? NOW : Date.parse('2026-10-20T04:00:00Z');
@@ -169,7 +171,7 @@ function tokenReport(state, range) {
   const models = series.map((item) => ({
     provider: item.provider,
     account_id: item.account_id,
-    model: item.account_id === '6' ? 'unlisted-demo-model' : modelNames[item.provider],
+    model: item.account_id === UNLISTED_ACCOUNT_ID ? UNLISTED_MODEL : modelNames[item.provider],
     totals: item.totals,
   }));
   // Why: demo costs match the short-prompt rates recorded in pricing.py on 2026-10-08.
@@ -185,7 +187,8 @@ function tokenReport(state, range) {
         BigInt(row.totals.cache_read) * rate[1] +
         BigInt(row.totals.output) * rate[2]) /
       1_000_000n;
-    const unpriced = row.model === 'unlisted-demo-model';
+    const isUnlisted = row.model === UNLISTED_MODEL;
+    const unpriced = isUnlisted && !ratesWereFetched;
     return {
       provider: row.provider,
       account_id: row.account_id,
@@ -197,6 +200,7 @@ function tokenReport(state, range) {
           priced: !unpriced,
           microdollars: unpriced ? null : String(price),
           unpriced_tokens: unpriced ? row.totals.total : '0',
+          rate_source: unpriced ? null : isUnlisted ? 'fetched' : 'listed',
         },
       ],
     };
@@ -215,11 +219,30 @@ function tokenReport(state, range) {
     })),
     costs: {
       priced_on: '2026-10-08',
+      fetched_on: ratesWereFetched ? '2026-11-10' : null,
       currency: 'USD',
       unit: 'microdollar',
       note: 'Estimated at published short-prompt API rates. This is not your subscription charge.',
       accounts: costs,
     },
+  };
+}
+
+/** What a rate update answers once the unlisted demo model's vendor page has stated its rate. */
+function rateUpdate(state) {
+  const owner = state.providers.find((provider) =>
+    provider.accounts.some((account) => account.id === UNLISTED_ACCOUNT_ID),
+  );
+  const fetched = { input: '2000000', cache_read: '200000', cache_write: null, output: '10000000' };
+  return {
+    checked_at: '2026-11-10T16:00:00+00:00',
+    pages: state.providers.map((provider) => ({
+      provider: provider.provider,
+      display_name: provider.display_name,
+      models_read: 4,
+      error: null,
+      changes: provider === owner ? [{ model: UNLISTED_MODEL, previous: null, fetched }] : [],
+    })),
   };
 }
 
@@ -241,6 +264,7 @@ function openRequest(body, method, target, challenge, nonce) {
 export async function mountDemo(page) {
   const state = demoState();
   const challenges = new Set();
+  let ratesWereFetched = false;
   await page.clock.install({ time: NOW });
   await page.addInitScript((token) => {
     window.__USAGEDASH_TOKEN = token;
@@ -277,9 +301,13 @@ export async function mountDemo(page) {
     if (digest !== expected) throw new Error('Demo request signature does not match');
     let answer;
     if (url.pathname === '/api/state') answer = state;
-    else if (url.pathname === '/api/tokens') answer = tokenReport(state, url.searchParams.get('range'));
-    else if (url.pathname === '/api/refresh') answer = { scheduled: true };
-    else if (request.method() === 'PATCH' && /^\/api\/accounts\/\d+$/.test(url.pathname)) {
+    else if (url.pathname === '/api/tokens') {
+      answer = tokenReport(state, url.searchParams.get('range'), ratesWereFetched);
+    } else if (url.pathname === '/api/refresh') answer = { scheduled: true };
+    else if (request.method() === 'POST' && url.pathname === '/api/rates/update') {
+      ratesWereFetched = true;
+      answer = rateUpdate(state);
+    } else if (request.method() === 'PATCH' && /^\/api\/accounts\/\d+$/.test(url.pathname)) {
       const item = state.providers
         .flatMap((provider) => provider.accounts)
         .find((item) => item.id === url.pathname.split('/').at(-1));
