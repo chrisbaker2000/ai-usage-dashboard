@@ -17,12 +17,16 @@ What each reader takes, as seen on 2026-11-10:
 - xAI: the text table headed ``Input | Cached | Output | Input | Cached | Output``. The first
   three prices are the short-context ones. It publishes no cache-write price.
 
-In each table a row of one cell is a section label and states no rate. Any other row must have one
-cell for each column and name a model, or the page is refused: skipping it would leave that model's
-rate as it was while the page was reported as read.
+Only two kinds of row are passed over: Claude's ``Additional models`` label, and its longer-prompt
+row directly under a model. Every other row must have one cell for each column and name a model, a
+heading may not repeat, and a table line must be delimited at both ends, or the page is refused:
+passing over anything else would leave a model's rate as it was while the page was reported as read.
+What no reader can tell is a model the page leaves out altogether; that is a model the vendor no
+longer lists, and it keeps the rate it has.
 """
 
 import re
+import unicodedata
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -46,6 +50,10 @@ _MODEL_ID = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
 _CLAUDE_NAME = re.compile(r"Claude ([A-Z][a-z]+) ([0-9]{1,2}(?:\.[0-9]{1,2})?)(?![0-9.])")
 
 _CLAUDE_HEADER = ("Name", "Input", "Output", "5m writes", "1h writes", "Hits and refreshes")
+_CLAUDE_SECTION_LABELS = frozenset({"Additional models"})
+_PRIVATE_USE = "Co"
+"""The Unicode category of a character a font assigns its own glyph to, as an icon font does."""
+_CLAUDE_LONG_PROMPT = re.compile(r"\$[0-9.]+\s*/\s*MTok\s*for prompts over ")
 _XAI_HEADER = ("Input", "Cached", "Output", "Input", "Cached", "Output")
 _XAI_ROW_CELLS = 8
 _OPENAI_LABEL = "Standard"
@@ -72,7 +80,24 @@ def _cells(line: str) -> tuple[str, ...] | None:
     return tuple(cell.strip() for cell in _CELL_BREAK.split(text[1:-1]))
 
 
+def _is_broken_table_line(text: str, follows_a_table_row: bool) -> bool:
+    """Report whether a line that is not a table line looks like one that lost part of itself.
+
+    That is a line delimited at one end only, or a line holding a cell break directly under a table
+    row. Read as ordinary text it would end the table there, and the rows from it on would be left
+    out of a page that was then reported as read.
+    """
+    if text.startswith("|") or (text.endswith("|") and not text.endswith("\\|")):
+        return True
+    return follows_a_table_row and _CELL_BREAK.search(text) is not None
+
+
 def _tables(markdown: str) -> Iterator[_Table]:
+    """Yield each table of the page.
+
+    Raises:
+        ProviderSchemaError: if a line is a table line that lost a delimiter (``_is_broken_table_line``).
+    """
     label = ""
     rows: list[tuple[str, ...]] = []
     for line in [*markdown.split("\n"), ""]:
@@ -81,6 +106,8 @@ def _tables(markdown: str) -> Iterator[_Table]:
             if not all(_SEPARATOR_CELL.fullmatch(cell) for cell in cells):
                 rows.append(cells)
             continue
+        if _is_broken_table_line(line.strip(), bool(rows)):
+            raise ProviderSchemaError("a pricing page has a table row that is not delimited at both ends")
         if rows:
             yield _Table(label, tuple(rows))
             rows = []
@@ -138,9 +165,17 @@ def _collected(models: Sequence[tuple[str, Rates]]) -> dict[str, Rates]:
     return rates_by_model
 
 
-def _is_section_label(row: tuple[str, ...]) -> bool:
-    """Report whether a row is one cell across the table, such as ``Additional models``: it states no rate."""
-    return len(row) == 1
+def _is_section_label(row: tuple[str, ...], labels: frozenset[str]) -> bool:
+    """Report whether a row is one of the one-cell labels this vendor's table is known to hold.
+
+    Why by its text and not by its width alone: a model row that lost every price cell is one cell too.
+    An icon drawn from a font's private-use characters is not part of the text: the live Claude label
+    is U+F003 followed by ``Additional models`` (seen 2026-11-10).
+    """
+    if len(row) != 1:
+        return False
+    text = "".join(character for character in row[0] if unicodedata.category(character) != _PRIVATE_USE)
+    return text.strip() in labels
 
 
 def _require_width(row: tuple[str, ...], width: int) -> None:
@@ -180,10 +215,17 @@ def read_claude_rates(markdown: str) -> dict[str, Rates]:
             name a model or state its prices.
     """
     models: list[tuple[str, Rates]] = []
+    follows_a_model = False
     for row in _rows_after(_only_table_with(markdown, _CLAUDE_HEADER), _CLAUDE_HEADER):
-        # Why a row that starts with a price: it continues the model above at a longer prompt.
-        if _is_section_label(row) or row[0].startswith("$"):
+        if _is_section_label(row, _CLAUDE_SECTION_LABELS):
+            follows_a_model = False
             continue
+        # Why only under a model, at one cell fewer, and saying so: a model row that lost its name
+        # also starts with a price, and must be refused, not taken for the longer-prompt row.
+        if follows_a_model and len(row) == len(_CLAUDE_HEADER) - 1 and _CLAUDE_LONG_PROMPT.match(row[0]):
+            follows_a_model = False
+            continue
+        follows_a_model = True
         _require_width(row, len(_CLAUDE_HEADER))
         name = _CLAUDE_NAME.search(row[0])
         if name is None:
@@ -200,7 +242,8 @@ def _openai_header(table: _Table) -> tuple[str, ...] | None:
     for another product (images, audio, fine-tuning) is not read.
 
     Raises:
-        ProviderSchemaError: if a standard model table lacks an input or output column. Skipping it
+        ProviderSchemaError: if a standard model table lacks an input or output column, or repeats a
+            heading. Skipping it
             would store the other tables' rates and report the page as read.
     """
     if table.label != _OPENAI_LABEL:
@@ -210,7 +253,8 @@ def _openai_header(table: _Table) -> tuple[str, ...] | None:
             continue
         if _OPENAI_OTHER_PRODUCTS & set(row):
             return None
-        if not set(row) >= _OPENAI_REQUIRED:
+        # Why a repeated heading is refused: the later column would be read under the earlier one's name.
+        if len(set(row)) != len(row) or not set(row) >= _OPENAI_REQUIRED:
             raise ProviderSchemaError("the OpenAI pricing page has a standard rate table without the expected columns")
         return row
     return None
@@ -230,8 +274,6 @@ def read_openai_rates(markdown: str) -> dict[str, Rates]:
             continue
         column = {name: index for index, name in enumerate(header)}
         for row in _rows_after(table, header):
-            if _is_section_label(row):
-                continue
             _require_width(row, len(header))
             model = row[column["Model"]]
             if _MODEL_ID.fullmatch(model) is None:
@@ -251,8 +293,6 @@ def read_xai_rates(markdown: str) -> dict[str, Rates]:
     """
     models: list[tuple[str, Rates]] = []
     for row in _rows_after(_only_table_with(markdown, _XAI_HEADER), _XAI_HEADER):
-        if _is_section_label(row):
-            continue
         _require_width(row, _XAI_ROW_CELLS)
         link = _LINK_TEXT.match(row[0])
         if link is None or _MODEL_ID.fullmatch(link.group(1)) is None:

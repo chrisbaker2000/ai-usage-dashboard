@@ -269,6 +269,14 @@ rate: short prompt, standard tier, Claude's 5-minute cache write, OpenAI's 30-mi
   vendor's rates stay as they were. It is not read loosely: Firecrawl's model-based extraction was
   tried first and returned a price as a sentence, a blank where the page stated a price, and one
   model of eight.
+- **A damaged table refuses the page; a model the page leaves out is not damage.** A row must have
+  one cell for each column and name a model, a heading may not repeat, and a table line must be
+  delimited at both ends. Only Claude's `Additional models` label and its longer-prompt row directly
+  under a model are passed over. What a reader cannot tell apart is a page that omits a model by
+  mistake from one where the vendor stopped listing it: both are a row that is not there. That model
+  keeps the rate it has, which is the behaviour for a dropped model above. Refusing a page for
+  listing fewer models than the last fetch was considered and not done: vendors do remove models,
+  and every later check would then be refused.
 - **OpenAI's page lists only its current models.** An older model, `gpt-5.6-sol` for one, is priced
   from the listed table until the code changes.
 - **A Claude model is named from its display name**: `Claude Fable 5.2` becomes `claude-fable-5-2`.

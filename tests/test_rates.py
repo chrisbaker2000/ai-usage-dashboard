@@ -301,14 +301,21 @@ class TestOpenAIPage:
         with pytest.raises(ProviderSchemaError, match=r"lists no model"):
             read_openai_rates(batch_only)
 
-    def test_a_standard_table_with_no_model_column_and_a_section_label_row_are_not_read(self) -> None:
+    def test_a_standard_table_with_no_model_column_is_not_read(self) -> None:
         page = (
             "Standard\n\n| Tool | Pricing |\n| --- | --- |\n| Web search | $10.00 / 1k calls |\n"
             "\nStandard\n\n" + OPENAI_COLUMNS + "| gpt-6-luna | $0.10 | $0.50 | $0.01 | $0.125 | $0.25 |\n"
-            "| All models |\n"
         )
 
         assert read_openai_rates(page) == {"gpt-6-luna": Rates(100_000, 10_000, 125_000, 500_000)}
+
+    @pytest.mark.parametrize("repeated", ["Input", "Output", "30m write"])
+    def test_a_repeated_heading_refuses_the_page_instead_of_reading_the_wrong_column(self, repeated: str) -> None:
+        columns = "| Model | Input | Output | Cached input | 30m write | 12h write |"
+        page = OPENAI_PAGE.replace(columns, columns.replace("| Cached input |", f"| {repeated} |"), 1)
+
+        with pytest.raises(ProviderSchemaError, match=r"standard rate table without the expected columns"):
+            read_openai_rates(page)
 
     @pytest.mark.parametrize("renamed", ["Input", "Output"])
     def test_one_standard_model_table_without_a_price_column_refuses_the_page_though_another_reads(
@@ -356,15 +363,6 @@ class TestXaiPage:
             "grok-4.5": Rates(2 * MILLION, 300_000, None, 6 * MILLION),
         }
 
-    def test_a_section_label_row_is_not_read(self) -> None:
-        page = (
-            XAI_HEADER
-            + "| [grok-4.7](https://example.test/models/grok-4.7) | 500k | $2.00 | $0.50 | $6.00 | $4.00 | $1.00 "
-            "| $12.00 |\n| Long context applies above 200k tokens |\n"
-        )
-
-        assert read_xai_rates(page) == {"grok-4.7": Rates(2 * MILLION, 500_000, None, 6 * MILLION)}
-
     @pytest.mark.parametrize(
         "cells",
         [
@@ -392,6 +390,106 @@ class TestXaiPage:
             read_xai_rates(page)
 
         assert PAGE_TEXT_MARKER not in str(refusal.value)
+
+
+def without_row(page: str, starts_with: str, replacement: str) -> str:
+    """Return ``page`` with the one line that starts with ``starts_with`` replaced by ``replacement``."""
+    start = page.index(starts_with)
+    end = page.index("\n", start)
+    return page[:start] + replacement + page[end:]
+
+
+ROWS = [
+    pytest.param(Provider.CLAUDE, CLAUDE_PAGE, "| Claude Opus 4.1 |", id="claude"),
+    pytest.param(Provider.CODEX, OPENAI_PAGE, "| gpt-6.1-terra |", id="openai"),
+    pytest.param(Provider.GROK, XAI_PAGE, "| [grok-4.5]", id="xai"),
+]
+
+
+class TestDamagedTables:
+    """A table that lost part of itself refuses the page; it is never read as a shorter table."""
+
+    @pytest.mark.parametrize(("provider", "page", "row"), ROWS)
+    @pytest.mark.parametrize("end", ["leading", "trailing"])
+    def test_a_model_row_missing_one_outer_delimiter_refuses_the_page(
+        self, provider: Provider, page: str, row: str, end: str
+    ) -> None:
+        line = page[page.index(row) : page.index("\n", page.index(row))]
+        damaged = line[1:].lstrip() if end == "leading" else line[:-1].rstrip()
+
+        with pytest.raises(ProviderSchemaError, match=r"not delimited at both ends"):
+            read_rates(provider, without_row(page, row, damaged))
+
+    @pytest.mark.parametrize(("provider", "page", "row"), ROWS)
+    def test_a_model_row_that_lost_every_price_cell_refuses_the_page(
+        self, provider: Provider, page: str, row: str
+    ) -> None:
+        line = page[page.index(row) : page.index("\n", page.index(row))]
+        name_only = line.split(" | ")[0].rstrip("| ") + " |"
+
+        with pytest.raises(ProviderSchemaError, match=r"without one cell for each column"):
+            read_rates(provider, without_row(page, row, name_only))
+
+    @pytest.mark.parametrize(("provider", "page", "row"), ROWS)
+    def test_a_one_cell_row_that_is_not_a_known_label_refuses_the_page(
+        self, provider: Provider, page: str, row: str
+    ) -> None:
+        with pytest.raises(ProviderSchemaError, match=r"without one cell for each column") as refusal:
+            read_rates(provider, without_row(page, row, f"| {PAGE_TEXT_MARKER} |"))
+
+        assert PAGE_TEXT_MARKER not in str(refusal.value)
+
+    def test_a_claude_model_row_that_lost_its_name_is_not_taken_for_the_longer_prompt_row(self) -> None:
+        nameless = "| $15/ MTok | $75/ MTok | $18.75/ MTok | $30/ MTok | $1.50/ MTok |"
+
+        with pytest.raises(ProviderSchemaError, match=r"without one cell for each column"):
+            read_claude_rates(without_row(CLAUDE_PAGE, "| Claude Opus 4.1 |", nameless))
+
+    LONGER_PROMPT_ROW = (
+        "| $0.50/ MTokfor prompts over 100,000 tokens | $2.50/ MTok | $0.625/ MTok | $1/ MTok | $0.05/ MTok |\n"
+    )
+
+    def test_the_section_label_is_known_with_the_icon_the_live_page_puts_before_it(self) -> None:
+        with_icon = CLAUDE_PAGE.replace("| Additional models |", "| Additional models |", 1)
+        with_letter = CLAUDE_PAGE.replace("| Additional models |", "| xAdditional models |", 1)
+
+        assert read_claude_rates(with_icon) == read_claude_rates(CLAUDE_PAGE)
+        with pytest.raises(ProviderSchemaError, match=r"without one cell for each column"):
+            read_claude_rates(with_letter)
+
+    def test_a_longer_prompt_row_under_a_section_label_refuses_the_page(self) -> None:
+        label = "| Additional models |\n"
+        moved = CLAUDE_PAGE.replace(self.LONGER_PROMPT_ROW, "", 1).replace(label, label + self.LONGER_PROMPT_ROW, 1)
+
+        assert "claude-haiku-5-5" in read_claude_rates(CLAUDE_PAGE)
+        with pytest.raises(ProviderSchemaError, match=r"without one cell for each column"):
+            read_claude_rates(moved)
+
+    def test_two_longer_prompt_rows_under_one_model_refuse_the_page(self) -> None:
+        doubled = CLAUDE_PAGE.replace(self.LONGER_PROMPT_ROW, self.LONGER_PROMPT_ROW * 2, 1)
+
+        with pytest.raises(ProviderSchemaError, match=r"without one cell for each column"):
+            read_claude_rates(doubled)
+
+    def test_text_with_a_cell_break_is_ordinary_text_when_it_is_not_under_a_table_row(self) -> None:
+        page = (
+            "Pricing a | b for the record\n\n" + CLAUDE_PAGE + "\nSee also: batch \\| and one escaped at the end \\|\n"
+        )
+
+        assert "claude-fable-5-2" in read_claude_rates(page)
+
+    def test_a_refused_page_stores_nothing_and_keeps_what_was_stored(self, database: Database, now: datetime) -> None:
+        update_rates(database, Firecrawl(PAGES).client(), stored_key, lambda: now)
+        before = stored_models(database)
+        line = "| gpt-6.1-terra | $1.00 | $5.00 | $0.05 | $1.25 | $2.50 |"
+        damaged = {**PAGES, RATE_PAGES[Provider.CODEX].url: OPENAI_PAGE.replace(line, line[:-1], 1)}
+
+        report = update_rates(database, Firecrawl(damaged).client(), stored_key, lambda: now + timedelta(days=1))
+
+        assert report.pages[1].error == "a pricing page has a table row that is not delimited at both ends"
+        assert stored_models(database) == before
+        with database.read() as conn:
+            assert {row.fetched_at for row in db.list_fetched_rates(conn) if row.provider == "codex"} == {now}
 
 
 class TestPageBounds:

@@ -556,6 +556,13 @@ ValidError` passing it, because a type name cannot be told from a value by its s
   model of eight. Do not bring it back to survive a layout change; fix the reader and add the page's
   new shape to `tests/test_rates.py`. A price cell must start with a dollar amount that does not run
   on into a digit, a point, or a comma, so `$5.0000001` and `$1,000` are refused, not shortened.
+  Nothing is skipped by its shape: a row needs one cell per column and a model name, a heading may
+  not repeat, and a table line needs both outer delimiters (`_require_width`,
+  `_is_broken_table_line`). The two rows passed over are named by their text
+  (`_CLAUDE_SECTION_LABELS`, `_CLAUDE_LONG_PROMPT`). A new kind of row a vendor adds is added there
+  by name; do not go back to skipping by cell count, which reported a page as read while a model
+  kept its old rate. A model a page omits altogether keeps its rate; `docs/known-limitations.md`
+  ("Fetched rates") records why that is accepted.
 - **The Firecrawl key is a login-keychain item, written by `security` itself**
   (`rate_updates.store_key_interactively`, service `usagedash-firecrawl`, account from the user
   database). `-w` as the last argument makes `security` prompt, so the key is never an argument, in

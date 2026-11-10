@@ -7,6 +7,10 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const UNLISTED_ACCOUNT_ID = '6';
 const UNLISTED_MODEL = 'unlisted-demo-model';
+export const RATE_UPDATE_SUCCEEDS = 'succeeds';
+export const RATE_UPDATE_REFUSED = 'refused';
+export const RATE_UPDATE_UNREACHABLE = 'unreachable';
+export const NO_KEY_DETAIL = 'No Firecrawl key is stored. Store one with `usagedash rates set-key`.';
 const iso = (offset = 0) => new Date(NOW + offset).toISOString();
 
 function quota(key, label, percent, resetHours, hours = 168) {
@@ -260,10 +264,17 @@ function openRequest(body, method, target, challenge, nonce) {
   return JSON.parse(Buffer.concat([decipher.update(body.subarray(12, -16)), decipher.final()]).toString());
 }
 
-/** Mounts a signed, sealed demo API without reading a real credential, session file, or database. */
-export async function mountDemo(page) {
+/**
+ * Mounts a signed, sealed demo API without reading a real credential, session file, or database.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {{ rateUpdates?: string[] }} [options] - How each rate update in turn ends; one past the
+ *   list succeeds.
+ */
+export async function mountDemo(page, { rateUpdates = [] } = {}) {
   const state = demoState();
   const challenges = new Set();
+  const rateUpdateOutcomes = [...rateUpdates];
   let ratesWereFetched = false;
   await page.clock.install({ time: NOW });
   await page.addInitScript((token) => {
@@ -300,13 +311,24 @@ export async function mountDemo(page) {
       .digest('hex');
     if (digest !== expected) throw new Error('Demo request signature does not match');
     let answer;
+    let status = 200;
     if (url.pathname === '/api/state') answer = state;
     else if (url.pathname === '/api/tokens') {
       answer = tokenReport(state, url.searchParams.get('range'), ratesWereFetched);
     } else if (url.pathname === '/api/refresh') answer = { scheduled: true };
     else if (request.method() === 'POST' && url.pathname === '/api/rates/update') {
-      ratesWereFetched = true;
-      answer = rateUpdate(state);
+      const outcome = rateUpdateOutcomes.shift() ?? RATE_UPDATE_SUCCEEDS;
+      if (outcome === RATE_UPDATE_UNREACHABLE) {
+        await route.abort('connectionrefused');
+        return;
+      }
+      if (outcome === RATE_UPDATE_REFUSED) {
+        status = 409;
+        answer = { detail: NO_KEY_DETAIL };
+      } else {
+        ratesWereFetched = true;
+        answer = rateUpdate(state);
+      }
     } else if (request.method() === 'PATCH' && /^\/api\/accounts\/\d+$/.test(url.pathname)) {
       const item = state.providers
         .flatMap((provider) => provider.accounts)
@@ -315,13 +337,13 @@ export async function mountDemo(page) {
       item.label = openRequest(body, request.method(), target, challenge, nonce).label;
       answer = { label: item.label };
     } else throw new Error(`Unexpected demo endpoint: ${url.pathname}`);
-    const sealed = sealedAnswerOf(TOKEN, challenge, nonce, 200, JSON.stringify(answer));
+    const sealed = sealedAnswerOf(TOKEN, challenge, nonce, status, JSON.stringify(answer));
     await route.fulfill({
-      status: 200,
+      status,
       body: Buffer.from(sealed),
       headers: {
         'Content-Type': 'application/octet-stream',
-        'X-Usagedash-Response': answerSignatureOf(TOKEN, challenge, nonce, 200, sealed),
+        'X-Usagedash-Response': answerSignatureOf(TOKEN, challenge, nonce, status, sealed),
       },
     });
   });
